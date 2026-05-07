@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -27,8 +28,11 @@ const (
 	screenBranchSelect
 	screenCommitSelect
 	screenCommitMessageInput
+	screenPartialHunkSelect
 	screenRevertSelect
 	screenConflictSelect
+	screenFileHistorySearch
+	screenFileHistorySelect
 	screenHistory
 	screenDiff
 	screenRunning
@@ -48,6 +52,7 @@ const (
 	actionCheckoutRevision
 	actionResolveConflicts
 	actionCommitHistory
+	actionFileHistory
 	actionQuit
 )
 
@@ -112,6 +117,12 @@ type historyLoadedMsg struct {
 	Err    error
 }
 
+type fileHistoryMatchesLoadedMsg struct {
+	Query string
+	Items []string
+	Err   error
+}
+
 type revertItemsLoadedMsg struct {
 	Items []commitItem
 	Err   error
@@ -121,6 +132,26 @@ type diffLoadedMsg struct {
 	Output string
 	Err    error
 	Path   string
+}
+
+type partialHunksLoadedMsg struct {
+	Item  commitItem
+	Hunks []partialHunk
+	Err   error
+}
+
+type partialHunk struct {
+	Header      string
+	OldStart    int
+	OldCount    int
+	NewStart    int
+	NewCount    int
+	Lines       []string
+	Selected    bool
+	Added       int
+	Removed     int
+	Context     int
+	PreviewText string
 }
 
 type model struct {
@@ -143,9 +174,20 @@ type model struct {
 	branchCursor int
 	branchOffset int
 
+	fileHistoryQuery  string
+	fileHistoryItems  []string
+	fileHistoryCursor int
+	fileHistoryOffset int
+
 	commitItems  []commitItem
 	commitCursor int
 	commitOffset int
+
+	partialItem       commitItem
+	partialHunks      []partialHunk
+	partialHunkCursor int
+	partialHunkOffset int
+	partialCommit     bool
 
 	conflictItems  []conflictItem
 	conflictCursor int
@@ -266,6 +308,7 @@ func main() {
 			"Checkout revision",
 			"Resolve conflicts",
 			"Commit history",
+			"File history",
 			"Quit",
 		},
 		input:    input,
@@ -313,7 +356,7 @@ func loadRepos() []repo {
 		}
 
 		if env := strings.TrimSpace(os.Getenv("SVN_TUI_REPOS")); env != "" {
-			parts := strings.Split(env, ":")
+			parts := filepath.SplitList(env)
 			for _, p := range parts {
 				p = strings.TrimSpace(p)
 				if p != "" {
@@ -454,10 +497,10 @@ Config file:
 
 Example:
 
-  path=/home/user/dev/
-  username=user
+  path=/home/hussar/dev/svn/ehaz
+  username=h.bence
   password=YOUR_PASSWORD_HERE
-  branch_username=user
+  branch_username=hussar
 
 Important:
 
@@ -582,6 +625,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoTop()
 		return m, nil
 
+	case fileHistoryMatchesLoadedMsg:
+		if msg.Err != nil {
+			m.screen = screenResult
+			m.err = msg.Err
+			m.result = "Failed to search files."
+			m.viewport.SetContent(m.result + "\n\n" + msg.Err.Error())
+			return m, nil
+		}
+
+		if len(msg.Items) == 0 {
+			m.screen = screenResult
+			m.err = nil
+			m.result = fmt.Sprintf("No files found for search: %s", msg.Query)
+			m.viewport.SetContent(m.result)
+			return m, nil
+		}
+
+		m.fileHistoryQuery = msg.Query
+		m.fileHistoryItems = msg.Items
+		m.fileHistoryCursor = 0
+		m.fileHistoryOffset = 0
+		m.screen = screenFileHistorySelect
+		return m, nil
+
 	case diffLoadedMsg:
 		m.screen = screenDiff
 		m.err = msg.Err
@@ -597,6 +664,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		m.viewport.GotoTop()
+		return m, nil
+
+	case partialHunksLoadedMsg:
+		if msg.Err != nil {
+			m.screen = screenResult
+			m.err = msg.Err
+			m.result = "Failed to load partial commit hunks."
+			m.viewport.SetContent(m.result + "\n\n" + msg.Err.Error())
+			return m, nil
+		}
+
+		if len(msg.Hunks) == 0 {
+			m.screen = screenResult
+			m.err = nil
+			m.result = "No selectable hunks found for partial commit."
+			m.viewport.SetContent(m.result)
+			return m, nil
+		}
+
+		m.partialItem = msg.Item
+		m.partialHunks = msg.Hunks
+		m.partialHunkCursor = 0
+		m.partialHunkOffset = 0
+		m.partialCommit = false
+		m.screen = screenPartialHunkSelect
 		return m, nil
 
 	case commandResult:
@@ -627,7 +719,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.screen == screenCreateBranchInput ||
 		m.screen == screenCheckoutRevisionInput ||
-		m.screen == screenCommitMessageInput {
+		m.screen == screenCommitMessageInput ||
+		m.screen == screenFileHistorySearch {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		return m, cmd
@@ -675,9 +768,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		case screenCreateBranchInput,
 			screenCheckoutRevisionInput,
+			screenFileHistorySearch,
+			screenFileHistorySelect,
 			screenBranchSelect,
 			screenCommitSelect,
 			screenCommitMessageInput,
+			screenPartialHunkSelect,
 			screenRevertSelect,
 			screenConflictSelect,
 			screenHistory,
@@ -701,6 +797,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case screenCheckoutRevisionInput:
 		return m.updateCheckoutRevisionInput(msg)
 
+	case screenFileHistorySearch:
+		return m.updateFileHistorySearch(msg)
+
+	case screenFileHistorySelect:
+		return m.updateFileHistorySelect(msg)
+
 	case screenBranchSelect:
 		return m.updateBranchSelect(msg)
 
@@ -709,6 +811,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case screenCommitMessageInput:
 		return m.updateCommitMessageInput(msg)
+
+	case screenPartialHunkSelect:
+		return m.updatePartialHunkSelect(msg)
 
 	case screenRevertSelect:
 		return m.updateRevertSelect(msg)
@@ -856,6 +961,12 @@ func (m model) updateActionSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.runningTitle = "Loading commit history..."
 			return m, loadHistoryCmd(m.activeRepo)
 
+		case actionFileHistory:
+			m.input.Reset()
+			m.input.Placeholder = "Search file path, e.g. action.php or inc/config"
+			m.input.Focus()
+			m.screen = screenFileHistorySearch
+
 		case actionQuit:
 			return m, tea.Quit
 		}
@@ -921,6 +1032,71 @@ func (m model) updateCheckoutRevisionInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 	m.input, cmd = m.input.Update(msg)
 
 	return m, cmd
+}
+
+func (m model) updateFileHistorySearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		query := strings.TrimSpace(m.input.Value())
+		if query == "" {
+			m.screen = screenResult
+			m.err = fmt.Errorf("file history search query is required")
+			m.result = "Please enter a file path search query, e.g. action.php or inc/config."
+			m.viewport.SetContent(m.result + "\n\n" + m.err.Error())
+			return m, nil
+		}
+
+		m.screen = screenRunning
+		m.runningTitle = "Searching files..."
+		return m, searchFileHistoryMatchesCmd(m.activeRepo, query)
+	}
+
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+
+	return m, cmd
+}
+
+func (m model) updateFileHistorySelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visible := m.visibleListCount(10)
+
+	switch msg.String() {
+	case "up", "k":
+		if m.fileHistoryCursor > 0 {
+			m.fileHistoryCursor--
+		}
+
+	case "down", "j":
+		if m.fileHistoryCursor < len(m.fileHistoryItems)-1 {
+			m.fileHistoryCursor++
+		}
+
+	case "pgup":
+		m.fileHistoryCursor = max(0, m.fileHistoryCursor-visible)
+
+	case "pgdown":
+		m.fileHistoryCursor = min(len(m.fileHistoryItems)-1, m.fileHistoryCursor+visible)
+
+	case "home":
+		m.fileHistoryCursor = 0
+
+	case "end":
+		m.fileHistoryCursor = len(m.fileHistoryItems) - 1
+
+	case "enter":
+		if len(m.fileHistoryItems) == 0 {
+			return m, nil
+		}
+
+		path := m.fileHistoryItems[m.fileHistoryCursor]
+		m.screen = screenRunning
+		m.runningTitle = "Loading file history..."
+		return m, loadFileHistoryCmd(m.activeRepo, path)
+	}
+
+	m.fileHistoryOffset = adjustOffset(m.fileHistoryOffset, m.fileHistoryCursor, visible)
+
+	return m, nil
 }
 
 func (m model) updateBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1012,7 +1188,33 @@ func (m model) updateCommitSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		m.screen = screenRunning
 		m.runningTitle = "Loading side-by-side diff..."
-		return m, diffCmd(m.activeRepo, item, m.viewport.Width)
+		return m, diffCmd(m.activeRepo, item, m.width)
+
+	case "p":
+		if len(m.commitItems) == 0 {
+			return m, nil
+		}
+
+		item := m.commitItems[m.commitCursor]
+		if item.Unversioned || strings.HasPrefix(item.Status, "?") {
+			m.screen = screenResult
+			m.err = fmt.Errorf("partial commit is not available for unversioned files")
+			m.result = "Use normal commit for unversioned files. Partial commit only works for modified versioned files."
+			m.viewport.SetContent(m.result + "\n\n" + m.err.Error())
+			return m, nil
+		}
+
+		if !strings.HasPrefix(item.Status, "M") {
+			m.screen = screenResult
+			m.err = fmt.Errorf("partial commit is only supported for modified versioned files")
+			m.result = "Partial commit currently supports M files only. Added/deleted/replaced files should use normal commit."
+			m.viewport.SetContent(m.result + "\n\n" + m.err.Error())
+			return m, nil
+		}
+
+		m.screen = screenRunning
+		m.runningTitle = "Loading partial commit hunks..."
+		return m, loadPartialHunksCmd(m.activeRepo, item)
 
 	case "enter":
 		if len(selectedCommitItems(m.commitItems)) == 0 {
@@ -1030,6 +1232,68 @@ func (m model) updateCommitSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	m.commitOffset = adjustOffset(m.commitOffset, m.commitCursor, visible)
+
+	return m, nil
+}
+
+func (m model) updatePartialHunkSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visible := m.visibleListCount(10)
+
+	switch msg.String() {
+	case "up", "k":
+		if m.partialHunkCursor > 0 {
+			m.partialHunkCursor--
+		}
+
+	case "down", "j":
+		if m.partialHunkCursor < len(m.partialHunks)-1 {
+			m.partialHunkCursor++
+		}
+
+	case "pgup":
+		m.partialHunkCursor = max(0, m.partialHunkCursor-visible)
+
+	case "pgdown":
+		m.partialHunkCursor = min(len(m.partialHunks)-1, m.partialHunkCursor+visible)
+
+	case "home":
+		m.partialHunkCursor = 0
+
+	case "end":
+		m.partialHunkCursor = len(m.partialHunks) - 1
+
+	case " ":
+		if len(m.partialHunks) > 0 {
+			m.partialHunks[m.partialHunkCursor].Selected = !m.partialHunks[m.partialHunkCursor].Selected
+		}
+
+	case "a":
+		for i := range m.partialHunks {
+			m.partialHunks[i].Selected = true
+		}
+
+	case "n":
+		for i := range m.partialHunks {
+			m.partialHunks[i].Selected = false
+		}
+
+	case "enter":
+		if len(selectedPartialHunks(m.partialHunks)) == 0 {
+			m.screen = screenResult
+			m.err = fmt.Errorf("no hunks selected")
+			m.result = "Select at least one hunk with Space before partial committing."
+			m.viewport.SetContent(m.result + "\n\n" + m.err.Error())
+			return m, nil
+		}
+
+		m.partialCommit = true
+		m.input.Reset()
+		m.input.Placeholder = "Partial commit message"
+		m.input.Focus()
+		m.screen = screenCommitMessageInput
+	}
+
+	m.partialHunkOffset = adjustOffset(m.partialHunkOffset, m.partialHunkCursor, visible)
 
 	return m, nil
 }
@@ -1084,7 +1348,7 @@ func (m model) updateRevertSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		m.screen = screenRunning
 		m.runningTitle = "Loading side-by-side diff..."
-		return m, diffCmd(m.activeRepo, item, m.viewport.Width)
+		return m, diffCmd(m.activeRepo, item, m.width)
 
 	case "enter":
 		paths := selectedCommitPaths(m.commitItems)
@@ -1117,6 +1381,18 @@ func (m model) updateCommitMessageInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.result = "Please enter a commit message."
 			m.viewport.SetContent(m.result + "\n\n" + m.err.Error())
 			return m, nil
+		}
+
+		if m.partialCommit {
+			item := m.partialItem
+			hunks := selectedPartialHunks(m.partialHunks)
+
+			m.partialCommit = false
+			m.partialItem = commitItem{}
+
+			m.screen = screenRunning
+			m.runningTitle = "Committing selected hunks..."
+			return m, partialHunkCommitCmd(m.activeRepo, item, hunks, message)
 		}
 
 		items := selectedCommitItems(m.commitItems)
@@ -1185,6 +1461,12 @@ func (m model) View() string {
 	case screenCheckoutRevisionInput:
 		return m.viewCheckoutRevisionInput()
 
+	case screenFileHistorySearch:
+		return m.viewFileHistorySearch()
+
+	case screenFileHistorySelect:
+		return m.viewFileHistorySelect()
+
 	case screenBranchSelect:
 		return m.viewBranchSelect()
 
@@ -1193,6 +1475,9 @@ func (m model) View() string {
 
 	case screenCommitMessageInput:
 		return m.viewCommitMessageInput()
+
+	case screenPartialHunkSelect:
+		return m.viewPartialHunkSelect()
 
 	case screenRevertSelect:
 		return m.viewRevertSelect()
@@ -1317,6 +1602,52 @@ func (m model) viewCheckoutRevisionInput() string {
 	return b.String()
 }
 
+func (m model) viewFileHistorySearch() string {
+	var b strings.Builder
+
+	b.WriteString(repoInfoHeader("File history search", m.activeRepo))
+	b.WriteString(mutedStyle.Render("Search by local working-copy file path. This does not list the whole repository.") + "\n\n")
+	b.WriteString(textStyle.Render("File path search:") + "\n")
+	b.WriteString(m.input.View() + "\n\n")
+	b.WriteString(mutedStyle.Render("Examples: action.php | ehaz.config | inc/config | payment/raiffeisen") + "\n")
+	b.WriteString(mutedStyle.Render("Enter: search | Esc: back"))
+
+	return b.String()
+}
+
+func (m model) viewFileHistorySelect() string {
+	var b strings.Builder
+
+	b.WriteString(repoInfoHeader("File history", m.activeRepo))
+	b.WriteString(mutedStyle.Render("Search: "+m.fileHistoryQuery) + "\n\n")
+	b.WriteString(textStyle.Render("Matching files:") + "\n")
+	b.WriteString(mutedStyle.Render("---------------") + "\n")
+
+	visible := m.visibleListCount(12)
+	end := min(len(m.fileHistoryItems), m.fileHistoryOffset+visible)
+
+	for i := m.fileHistoryOffset; i < end; i++ {
+		path := m.fileHistoryItems[i]
+
+		cursor := " "
+		lineStyle := normalStyle
+
+		if i == m.fileHistoryCursor {
+			cursor = ">"
+			lineStyle = selectedStyle
+		}
+
+		line := fmt.Sprintf("%s %s", cursor, path)
+		b.WriteString(lineStyle.Render(line) + "\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render(scrollHint(m.fileHistoryOffset, end, len(m.fileHistoryItems))) + "\n")
+	b.WriteString(mutedStyle.Render("↑/↓ or j/k: move | PgUp/PgDn: scroll | Enter: show history | Esc: back"))
+
+	return b.String()
+}
+
 func (m model) viewBranchSelect() string {
 	var b strings.Builder
 
@@ -1395,7 +1726,63 @@ func (m model) viewCommitSelect() string {
 
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render(scrollHint(m.commitOffset, end, len(m.commitItems))) + "\n")
-	b.WriteString(mutedStyle.Render("Space: select | a: all | n: none | d: side-by-side diff | Enter: commit message | Esc: back"))
+	b.WriteString(mutedStyle.Render("Space: select | a: all | n: none | d: diff | p: partial hunks | Enter: commit message | Esc: back"))
+
+	return b.String()
+}
+
+func (m model) viewPartialHunkSelect() string {
+	var b strings.Builder
+
+	selectedCount := len(selectedPartialHunks(m.partialHunks))
+
+	b.WriteString(repoInfoHeader("Partial commit hunks", m.activeRepo))
+	b.WriteString(mutedStyle.Render("File: "+m.partialItem.Path) + "\n")
+	b.WriteString(mutedStyle.Render(fmt.Sprintf("Selected hunks: %d of %d", selectedCount, len(m.partialHunks))) + "\n\n")
+	b.WriteString(textStyle.Render("Choose hunks to commit:") + "\n")
+	b.WriteString(mutedStyle.Render("-----------------------") + "\n")
+
+	visible := m.visibleListCount(12)
+	end := min(len(m.partialHunks), m.partialHunkOffset+visible)
+
+	for i := m.partialHunkOffset; i < end; i++ {
+		hunk := m.partialHunks[i]
+
+		cursor := " "
+		lineStyle := normalStyle
+
+		if i == m.partialHunkCursor {
+			cursor = ">"
+			lineStyle = selectedStyle
+		}
+
+		check := checkboxStyle.Render("[ ]")
+		if hunk.Selected {
+			check = checkedStyle.Render("[x]")
+		}
+
+		addInfo := diffAddedStyle.Render(fmt.Sprintf("+%d", hunk.Added))
+		removeInfo := diffDeletedStyle.Render(fmt.Sprintf("-%d", hunk.Removed))
+		headerText := hunk.Header
+		if hunk.Added > 0 && hunk.Removed > 0 {
+			headerText = diffModifiedStyle.Render(headerText)
+		}
+
+		summary := fmt.Sprintf("%s %s hunk %d  %s  %s %s", cursor, check, i+1, headerText, addInfo, removeInfo)
+		if hunk.Selected && i != m.partialHunkCursor {
+			b.WriteString(checkedStyle.Render(summary) + "\n")
+		} else {
+			b.WriteString(lineStyle.Render(summary) + "\n")
+		}
+
+		for _, previewLine := range renderPartialHunkPreview(hunk, 8) {
+			b.WriteString("      " + previewLine + "\n")
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render(scrollHint(m.partialHunkOffset, end, len(m.partialHunks))) + "\n")
+	b.WriteString(mutedStyle.Render("Space: select | a: all | n: none | Enter: commit message | Esc: back"))
 
 	return b.String()
 }
@@ -1446,8 +1833,111 @@ func (m model) viewRevertSelect() string {
 	return b.String()
 }
 
+func renderPartialHunkPreview(h partialHunk, maxChangedLines int) []string {
+	type previewLine struct {
+		Prefix string
+		Text   string
+		Kind   string
+	}
+
+	var changed []previewLine
+	for _, rawLine := range h.Lines {
+		if rawLine == "" {
+			continue
+		}
+
+		prefix := string(rawLine[0])
+		if prefix == " " {
+			continue
+		}
+
+		if prefix != "+" && prefix != "-" {
+			continue
+		}
+
+		text := ""
+		if len(rawLine) > 1 {
+			text = strings.TrimRight(rawLine[1:], "\n")
+		}
+
+		kind := "added"
+		if prefix == "-" {
+			kind = "deleted"
+		}
+
+		changed = append(changed, previewLine{
+			Prefix: prefix,
+			Text:   strings.TrimSpace(text),
+			Kind:   kind,
+		})
+	}
+
+	for i := 0; i < len(changed)-1; i++ {
+		if changed[i].Prefix == "-" && changed[i+1].Prefix == "+" {
+			changed[i].Kind = "modified"
+			changed[i+1].Kind = "modified"
+			i++
+		}
+	}
+
+	if len(changed) == 0 {
+		return nil
+	}
+
+	limit := maxChangedLines
+	if limit <= 0 {
+		limit = 8
+	}
+
+	var out []string
+	for i, line := range changed {
+		if i >= limit {
+			out = append(out, mutedStyle.Render("..."))
+			break
+		}
+
+		preview := line.Prefix + " " + line.Text
+		switch line.Kind {
+		case "added":
+			out = append(out, diffAddedStyle.Render(preview))
+		case "deleted":
+			out = append(out, diffDeletedStyle.Render(preview))
+		case "modified":
+			out = append(out, diffModifiedStyle.Render(preview))
+		default:
+			out = append(out, mutedStyle.Render(preview))
+		}
+	}
+
+	return out
+}
+
 func (m model) viewCommitMessageInput() string {
 	var b strings.Builder
+
+	if m.partialCommit {
+		selected := selectedPartialHunks(m.partialHunks)
+
+		b.WriteString(repoInfoHeader("Partial commit message", m.activeRepo))
+		b.WriteString(mutedStyle.Render("File: "+m.partialItem.Path) + "\n")
+		b.WriteString(mutedStyle.Render(fmt.Sprintf("Selected hunks: %d", len(selected))) + "\n\n")
+
+		previewLimit := min(6, len(selected))
+		for i := 0; i < previewLimit; i++ {
+			b.WriteString(mutedStyle.Render(fmt.Sprintf("  hunk %d: %s", i+1, selected[i].Header)) + "\n")
+		}
+
+		if len(selected) > previewLimit {
+			b.WriteString(mutedStyle.Render(fmt.Sprintf("  ... and %d more", len(selected)-previewLimit)) + "\n")
+		}
+
+		b.WriteString("\n")
+		b.WriteString(textStyle.Render("Commit message:") + "\n")
+		b.WriteString(m.input.View() + "\n\n")
+		b.WriteString(mutedStyle.Render("Enter: commit selected hunks | Esc: back"))
+
+		return b.String()
+	}
 
 	items := selectedCommitItems(m.commitItems)
 
@@ -2269,6 +2759,174 @@ func resolveConflictWithMeldCmd(r repo, path string) tea.Cmd {
 	}
 }
 
+func searchFileHistoryMatchesCmd(r repo, query string) tea.Cmd {
+	return func() tea.Msg {
+		items, err := searchFileHistoryMatches(r, query, 300)
+		return fileHistoryMatchesLoadedMsg{
+			Query: query,
+			Items: items,
+			Err:   err,
+		}
+	}
+}
+
+func searchFileHistoryMatches(r repo, query string, limit int) ([]string, error) {
+	query = strings.ToLower(strings.TrimSpace(filepath.ToSlash(query)))
+	if query == "" {
+		return nil, fmt.Errorf("empty file search query")
+	}
+
+	if limit <= 0 {
+		limit = 300
+	}
+
+	var exact []string
+	var contains []string
+
+	err := filepath.WalkDir(r.Path, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+
+		if d.IsDir() {
+			if d.Name() == ".svn" || d.Name() == ".git" || d.Name() == "node_modules" || d.Name() == "vendor" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		rel, err := filepath.Rel(r.Path, path)
+		if err != nil {
+			return nil
+		}
+
+		rel = filepath.ToSlash(rel)
+		lower := strings.ToLower(rel)
+
+		if lower == query || filepath.Base(lower) == query {
+			exact = append(exact, rel)
+			return nil
+		}
+
+		if strings.Contains(lower, query) {
+			contains = append(contains, rel)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Strings(exact)
+	sort.Strings(contains)
+
+	items := append(exact, contains...)
+	if len(items) > limit {
+		items = items[:limit]
+	}
+
+	return items, nil
+}
+
+func loadFileHistoryCmd(r repo, path string) tea.Cmd {
+	return func() tea.Msg {
+		out, err := svn(r, "log", "-l", "80", "--", path)
+
+		if err != nil {
+			return historyLoadedMsg{
+				Output: out,
+				Err: fmt.Errorf(
+					"svn file log failed\n\nWorking copy: %s\nFile: %s\n\nOutput:\n%s\n\nError: %w",
+					r.Path,
+					path,
+					out,
+					err,
+				),
+			}
+		}
+
+		if strings.TrimSpace(out) == "" {
+			out = "No file history found for: " + path
+		} else {
+			out = "File: " + path + "\n\n" + colorizeSVNLog(out)
+		}
+
+		return historyLoadedMsg{
+			Output: out,
+			Err:    nil,
+		}
+	}
+}
+
+func colorizeSVNLog(out string) string {
+	lines := strings.Split(out, "\n")
+	var b strings.Builder
+	inMessage := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		if isSVNLogSeparator(trimmed) {
+			b.WriteString(labelMauveStyle.Render(line) + "\n")
+			inMessage = false
+			continue
+		}
+
+		if strings.HasPrefix(line, "r") && strings.Contains(line, " | ") {
+			b.WriteString(colorizeSVNLogMetaLine(line) + "\n")
+			inMessage = true
+			continue
+		}
+
+		if inMessage && trimmed != "" {
+			b.WriteString(actionStyle.Render(line) + "\n")
+			continue
+		}
+
+		b.WriteString(line + "\n")
+	}
+
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func isSVNLogSeparator(line string) bool {
+	if len(line) < 8 {
+		return false
+	}
+
+	for _, r := range line {
+		if r != '-' {
+			return false
+		}
+	}
+
+	return true
+}
+
+func colorizeSVNLogMetaLine(line string) string {
+	parts := strings.Split(line, "|")
+	if len(parts) < 2 {
+		return line
+	}
+
+	var b strings.Builder
+	for i, part := range parts {
+		if i > 0 {
+			b.WriteString(labelMauveStyle.Render("|"))
+		}
+
+		text := part
+		trimmed := strings.TrimSpace(part)
+		if i == 1 && trimmed != "" {
+			text = strings.Replace(part, trimmed, labelYellowStyle.Render(trimmed), 1)
+		}
+		b.WriteString(text)
+	}
+
+	return b.String()
+}
+
 func loadHistoryCmd(r repo) tea.Cmd {
 	return func() tea.Msg {
 		out, err := svn(
@@ -2292,6 +2950,8 @@ func loadHistoryCmd(r repo) tea.Cmd {
 
 		if strings.TrimSpace(out) == "" {
 			out = "No commit history found."
+		} else {
+			out = colorizeSVNLog(out)
 		}
 
 		return historyLoadedMsg{
@@ -2301,9 +2961,142 @@ func loadHistoryCmd(r repo) tea.Cmd {
 	}
 }
 
+func loadPartialHunksCmd(r repo, item commitItem) tea.Cmd {
+	return func() tea.Msg {
+		hunks, err := loadPartialHunks(r, item)
+		return partialHunksLoadedMsg{
+			Item:  item,
+			Hunks: hunks,
+			Err:   err,
+		}
+	}
+}
+
+func loadPartialHunks(r repo, item commitItem) ([]partialHunk, error) {
+	if item.Unversioned || strings.HasPrefix(item.Status, "?") {
+		return nil, fmt.Errorf("partial commit is not available for unversioned files")
+	}
+
+	if !strings.HasPrefix(item.Status, "M") {
+		return nil, fmt.Errorf("partial commit currently supports modified versioned files only")
+	}
+
+	if isLikelyDirectory(r, item.Path) {
+		return nil, fmt.Errorf("partial commit is only supported for files")
+	}
+
+	out, err := svn(r, "diff", item.Path)
+	if err != nil {
+		return nil, fmt.Errorf("svn diff failed for partial commit\n\nOutput:\n%s\n\nError: %w", out, err)
+	}
+
+	hunks, err := parseUnifiedDiffHunks(out)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(hunks) == 0 {
+		return nil, fmt.Errorf("no hunks found in svn diff output")
+	}
+
+	return hunks, nil
+}
+
+func partialHunkCommitCmd(r repo, item commitItem, hunks []partialHunk, message string) tea.Cmd {
+	return func() tea.Msg {
+		var output strings.Builder
+
+		fullPath := filepath.Join(r.Path, filepath.FromSlash(item.Path))
+
+		info, err := os.Stat(fullPath)
+		if err != nil {
+			return commandResult{Output: output.String(), Err: err, CurrentLocation: getCurrentLocation(r)}
+		}
+
+		if info.IsDir() {
+			return commandResult{Output: output.String(), Err: fmt.Errorf("partial commit is only supported for files"), CurrentLocation: getCurrentLocation(r)}
+		}
+
+		workingData, err := os.ReadFile(fullPath)
+		if err != nil {
+			return commandResult{Output: output.String(), Err: err, CurrentLocation: getCurrentLocation(r)}
+		}
+
+		baseText, err := readBaseFile(r, item.Path)
+		if err != nil {
+			return commandResult{Output: output.String(), Err: err, CurrentLocation: getCurrentLocation(r)}
+		}
+
+		baseLines := splitPatchLines(baseText)
+		partialLines, err := applySelectedHunksToBase(baseLines, hunks)
+		if err != nil {
+			return commandResult{Output: output.String(), Err: err, CurrentLocation: getCurrentLocation(r)}
+		}
+
+		partialText := joinPatchLines(partialLines, hasFinalNewline(string(workingData), baseText))
+		if partialText == baseText {
+			return commandResult{Output: "Selected hunks do not change the file compared to SVN base.", Err: fmt.Errorf("partial commit produced no changes"), CurrentLocation: getCurrentLocation(r)}
+		}
+
+		backupDir, err := os.MkdirTemp("", "svn-tui-partial-hunk-backup-*")
+		if err != nil {
+			return commandResult{Output: output.String(), Err: err, CurrentLocation: getCurrentLocation(r)}
+		}
+
+		backupPath := filepath.Join(backupDir, filepath.Base(item.Path)+".working-backup")
+		if err := os.WriteFile(backupPath, workingData, info.Mode().Perm()); err != nil {
+			return commandResult{Output: output.String(), Err: err, CurrentLocation: getCurrentLocation(r)}
+		}
+
+		output.WriteString("Working copy: " + r.Path + "\n")
+		output.WriteString("Partial commit file: " + item.Path + "\n")
+		output.WriteString(fmt.Sprintf("Selected hunks: %d\n", len(hunks)))
+		output.WriteString("Backup: " + backupPath + "\n\n")
+
+		restored := false
+		restore := func() {
+			if restored {
+				return
+			}
+			_ = os.WriteFile(fullPath, workingData, info.Mode().Perm())
+			restored = true
+		}
+		defer restore()
+
+		output.WriteString("Writing selected hunks into working copy temporarily...\n")
+		if err := os.WriteFile(fullPath, []byte(partialText), info.Mode().Perm()); err != nil {
+			return commandResult{Output: output.String(), Err: err, CurrentLocation: getCurrentLocation(r)}
+		}
+
+		output.WriteString("Running partial hunk commit...\n\n")
+		out, err := svn(r, "commit", item.Path, "-m", message)
+		output.WriteString(out)
+
+		if err != nil {
+			output.WriteString("\nCommit failed. Original working copy content was restored from memory. Backup kept at:\n  " + backupPath + "\n")
+			return commandResult{Output: output.String(), Err: err, CurrentLocation: getCurrentLocation(r)}
+		}
+
+		restore()
+		output.WriteString("\nPartial hunk commit finished successfully.")
+		output.WriteString("\nOriginal full working copy content restored, so uncommitted changes remain local.")
+		output.WriteString("\nBackup kept at:\n  " + backupPath + "\n")
+
+		return commandResult{Output: output.String(), Err: nil, CurrentLocation: getCurrentLocation(r)}
+	}
+}
+
 func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 	if width <= 0 {
 		width = 160
+	}
+
+	leftWidth := max(30, (width-14)/2)
+	rightWidth := leftWidth
+
+	if leftWidth > 90 {
+		leftWidth = 90
+		rightWidth = 90
 	}
 
 	if isLikelyDirectory(r, item.Path) {
@@ -2345,50 +3138,33 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 
 	oldLines := splitLinesForDiff(oldText)
 	newLines := splitLinesForDiff(newText)
-	allRows := sideBySideRowsRaw(oldLines, newLines)
-	stats := diffLineStats(allRows)
-	rows := compactUnchangedRows(allRows, 4)
-
-	lineNumberWidth := max(4, len(fmt.Sprintf("%d", max(len(oldLines), len(newLines)))))
-	sideGutterWidth := lineNumberWidth + 3
-	contentWidth := max(24, (width-7-(sideGutterWidth*2))/2)
-
-	if contentWidth > 90 {
-		contentWidth = 90
-	}
-
-	leftWidth := sideGutterWidth + contentWidth
-	rightWidth := leftWidth
 
 	var b strings.Builder
 
 	b.WriteString("Path: " + item.Path + "\n")
 	b.WriteString("Status: " + item.Status + "\n")
-	b.WriteString(fmt.Sprintf("Line count: old/base %d | new/working %d\n", len(oldLines), len(newLines)))
-	b.WriteString(fmt.Sprintf("Diff summary: +%d added | -%d removed | ~%d changed | =%d unchanged\n", stats.Added, stats.Removed, stats.Modified, stats.Same))
-	b.WriteString(fmt.Sprintf("Line numbers: left = old/base file | right = new/working copy\n"))
 	if item.Unversioned {
 		b.WriteString("Note: unversioned file, left side is empty. It will be svn add-ed before commit if selected.\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(padRight(formatDiffCellHeader("OLD / BASE", len(oldLines), lineNumberWidth, contentWidth), leftWidth) + " │ Δ │ " + padRight(formatDiffCellHeader("NEW / WORKING COPY", len(newLines), lineNumberWidth, contentWidth), rightWidth) + "\n")
+	b.WriteString(padRight("OLD / BASE", leftWidth) + " │ Δ │ " + padRight("NEW / WORKING COPY", rightWidth) + "\n")
 	b.WriteString(strings.Repeat("─", leftWidth) + "─┼───┼─" + strings.Repeat("─", rightWidth) + "\n")
 
+	rows := sideBySideRows(oldLines, newLines)
+
 	if len(rows) == 0 {
-		b.WriteString(renderDiffLine(0, "", "=", 0, "", lineNumberWidth, contentWidth) + "\n")
+		b.WriteString(padRight("", leftWidth) + " │ = │ " + padRight("", rightWidth) + "\n")
 		return b.String(), nil
 	}
 
 	for _, row := range rows {
-		leftWrapped := wrapLine(row.Left, contentWidth)
-		rightWrapped := wrapLine(row.Right, contentWidth)
+		leftWrapped := wrapLine(row.Left, leftWidth)
+		rightWrapped := wrapLine(row.Right, rightWidth)
 
 		maxParts := max(len(leftWrapped), len(rightWrapped))
 		for i := 0; i < maxParts; i++ {
 			left := ""
 			right := ""
-			oldLine := 0
-			newLine := 0
 
 			if i < len(leftWrapped) {
 				left = leftWrapped[i]
@@ -2398,14 +3174,11 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 			}
 
 			marker := row.Marker
-			if i == 0 {
-				oldLine = row.OldLine
-				newLine = row.NewLine
-			} else {
+			if i > 0 {
 				marker = " "
 			}
 
-			b.WriteString(renderDiffLine(oldLine, left, marker, newLine, right, lineNumberWidth, contentWidth, row.Marker) + "\n")
+			b.WriteString(padRight(left, leftWidth) + " │ " + marker + " │ " + padRight(right, rightWidth) + "\n")
 		}
 	}
 
@@ -2413,14 +3186,12 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 }
 
 type diffRow struct {
-	Left    string
-	Right   string
-	Marker  string
-	OldLine int
-	NewLine int
+	Left   string
+	Right  string
+	Marker string
 }
 
-func sideBySideRowsRaw(oldLines []string, newLines []string) []diffRow {
+func sideBySideRows(oldLines []string, newLines []string) []diffRow {
 	n := len(oldLines)
 	m := len(newLines)
 
@@ -2449,11 +3220,9 @@ func sideBySideRowsRaw(oldLines []string, newLines []string) []diffRow {
 	for i < n && j < m {
 		if oldLines[i] == newLines[j] {
 			rows = append(rows, diffRow{
-				Left:    oldLines[i],
-				Right:   newLines[j],
-				Marker:  "=",
-				OldLine: i + 1,
-				NewLine: j + 1,
+				Left:   oldLines[i],
+				Right:  newLines[j],
+				Marker: "=",
 			})
 			i++
 			j++
@@ -2462,11 +3231,9 @@ func sideBySideRowsRaw(oldLines []string, newLines []string) []diffRow {
 
 		if i+1 < n && oldLines[i+1] == newLines[j] {
 			rows = append(rows, diffRow{
-				Left:    oldLines[i],
-				Right:   "",
-				Marker:  "-",
-				OldLine: i + 1,
-				NewLine: 0,
+				Left:   oldLines[i],
+				Right:  "",
+				Marker: "-",
 			})
 			i++
 			continue
@@ -2474,11 +3241,9 @@ func sideBySideRowsRaw(oldLines []string, newLines []string) []diffRow {
 
 		if j+1 < m && oldLines[i] == newLines[j+1] {
 			rows = append(rows, diffRow{
-				Left:    "",
-				Right:   newLines[j],
-				Marker:  "+",
-				OldLine: 0,
-				NewLine: j + 1,
+				Left:   "",
+				Right:  newLines[j],
+				Marker: "+",
 			})
 			j++
 			continue
@@ -2486,29 +3251,23 @@ func sideBySideRowsRaw(oldLines []string, newLines []string) []diffRow {
 
 		if dp[i+1][j] > dp[i][j+1] {
 			rows = append(rows, diffRow{
-				Left:    oldLines[i],
-				Right:   "",
-				Marker:  "-",
-				OldLine: i + 1,
-				NewLine: 0,
+				Left:   oldLines[i],
+				Right:  "",
+				Marker: "-",
 			})
 			i++
 		} else if dp[i][j+1] > dp[i+1][j] {
 			rows = append(rows, diffRow{
-				Left:    "",
-				Right:   newLines[j],
-				Marker:  "+",
-				OldLine: 0,
-				NewLine: j + 1,
+				Left:   "",
+				Right:  newLines[j],
+				Marker: "+",
 			})
 			j++
 		} else {
 			rows = append(rows, diffRow{
-				Left:    oldLines[i],
-				Right:   newLines[j],
-				Marker:  "~",
-				OldLine: i + 1,
-				NewLine: j + 1,
+				Left:   oldLines[i],
+				Right:  newLines[j],
+				Marker: "~",
 			})
 			i++
 			j++
@@ -2517,99 +3276,23 @@ func sideBySideRowsRaw(oldLines []string, newLines []string) []diffRow {
 
 	for i < n {
 		rows = append(rows, diffRow{
-			Left:    oldLines[i],
-			Right:   "",
-			Marker:  "-",
-			OldLine: i + 1,
-			NewLine: 0,
+			Left:   oldLines[i],
+			Right:  "",
+			Marker: "-",
 		})
 		i++
 	}
 
 	for j < m {
 		rows = append(rows, diffRow{
-			Left:    "",
-			Right:   newLines[j],
-			Marker:  "+",
-			OldLine: 0,
-			NewLine: j + 1,
+			Left:   "",
+			Right:  newLines[j],
+			Marker: "+",
 		})
 		j++
 	}
 
-	return rows
-}
-
-type diffStats struct {
-	Added    int
-	Removed  int
-	Modified int
-	Same     int
-}
-
-func diffLineStats(rows []diffRow) diffStats {
-	var stats diffStats
-
-	for _, row := range rows {
-		switch row.Marker {
-		case "+":
-			stats.Added++
-		case "-":
-			stats.Removed++
-		case "~":
-			stats.Modified++
-		case "=":
-			stats.Same++
-		}
-	}
-
-	return stats
-}
-
-func renderDiffLine(oldLine int, left string, marker string, newLine int, right string, lineNumberWidth int, contentWidth int, styleMarker ...string) string {
-	styleKey := marker
-	if len(styleMarker) > 0 && styleMarker[0] != "" {
-		styleKey = styleMarker[0]
-	}
-
-	leftCell := formatDiffCell(oldLine, left, lineNumberWidth, contentWidth)
-	markerCell := marker
-	rightCell := formatDiffCell(newLine, right, lineNumberWidth, contentWidth)
-
-	switch styleKey {
-	case "+":
-		markerCell = diffAddedStyle.Render(markerCell)
-		rightCell = diffAddedStyle.Render(rightCell)
-	case "-":
-		leftCell = diffDeletedStyle.Render(leftCell)
-		markerCell = diffDeletedStyle.Render(markerCell)
-	case "~":
-		leftCell = diffModifiedStyle.Render(leftCell)
-		markerCell = diffModifiedStyle.Render(markerCell)
-		rightCell = diffModifiedStyle.Render(rightCell)
-	case "=":
-		leftCell = diffSameStyle.Render(leftCell)
-		markerCell = diffSameStyle.Render(markerCell)
-		rightCell = diffSameStyle.Render(rightCell)
-	}
-
-	return leftCell + " │ " + markerCell + " │ " + rightCell
-}
-
-func formatDiffCell(lineNumber int, text string, lineNumberWidth int, contentWidth int) string {
-	return formatLineNumber(lineNumber, lineNumberWidth) + " │ " + padRight(text, contentWidth)
-}
-
-func formatDiffCellHeader(label string, lineCount int, lineNumberWidth int, contentWidth int) string {
-	return padRight("line", lineNumberWidth) + " │ " + padRight(fmt.Sprintf("%s (%d lines)", label, lineCount), contentWidth)
-}
-
-func formatLineNumber(lineNumber int, width int) string {
-	if lineNumber <= 0 {
-		return strings.Repeat(" ", width)
-	}
-
-	return fmt.Sprintf("%*d", width, lineNumber)
+	return compactUnchangedRows(rows, 4)
 }
 
 func compactUnchangedRows(rows []diffRow, context int) []diffRow {
@@ -2648,11 +3331,9 @@ func compactUnchangedRows(rows []diffRow, context int) []diffRow {
 		if changed[i] {
 			if hidden {
 				out = append(out, diffRow{
-					Left:    "...",
-					Right:   "...",
-					Marker:  " ",
-					OldLine: 0,
-					NewLine: 0,
+					Left:   "...",
+					Right:  "...",
+					Marker: " ",
 				})
 				hidden = false
 			}
@@ -2665,11 +3346,9 @@ func compactUnchangedRows(rows []diffRow, context int) []diffRow {
 
 	if hidden {
 		out = append(out, diffRow{
-			Left:    "...",
-			Right:   "...",
-			Marker:  " ",
-			OldLine: 0,
-			NewLine: 0,
+			Left:   "...",
+			Right:  "...",
+			Marker: " ",
 		})
 	}
 
@@ -2719,44 +3398,7 @@ func splitLinesForDiff(text string) []string {
 		lines = lines[:len(lines)-1]
 	}
 
-	for i := range lines {
-		lines[i] = expandTabs(lines[i], 4)
-	}
-
 	return lines
-}
-
-func expandTabs(s string, tabWidth int) string {
-	if tabWidth <= 0 {
-		tabWidth = 4
-	}
-
-	var b strings.Builder
-	column := 0
-
-	for _, r := range s {
-		if r == '\t' {
-			spaces := tabWidth - (column % tabWidth)
-			if spaces == 0 {
-				spaces = tabWidth
-			}
-
-			b.WriteString(strings.Repeat(" ", spaces))
-			column += spaces
-			continue
-		}
-
-		b.WriteRune(r)
-
-		w := lipgloss.Width(string(r))
-		if w <= 0 {
-			w = 1
-		}
-
-		column += w
-	}
-
-	return b.String()
 }
 
 func wrapLine(s string, width int) []string {
@@ -2768,69 +3410,246 @@ func wrapLine(s string, width int) []string {
 		return []string{""}
 	}
 
+	runes := []rune(s)
 	var parts []string
-	var b strings.Builder
-	currentWidth := 0
 
-	for _, r := range s {
-		piece := string(r)
-		pieceWidth := lipgloss.Width(piece)
-		if pieceWidth <= 0 {
-			pieceWidth = 1
-		}
-
-		if currentWidth > 0 && currentWidth+pieceWidth > width {
-			parts = append(parts, b.String())
-			b.Reset()
-			currentWidth = 0
-		}
-
-		b.WriteRune(r)
-		currentWidth += pieceWidth
+	for len(runes) > width {
+		parts = append(parts, string(runes[:width]))
+		runes = runes[width:]
 	}
 
-	parts = append(parts, b.String())
+	parts = append(parts, string(runes))
 
 	return parts
 }
 
 func padRight(s string, width int) string {
-	if width <= 0 {
-		return ""
+	runes := []rune(s)
+	if len(runes) >= width {
+		return string(runes[:width])
 	}
 
-	currentWidth := lipgloss.Width(s)
-	if currentWidth > width {
-		return truncateVisual(s, width)
-	}
-
-	return s + strings.Repeat(" ", width-currentWidth)
+	return s + strings.Repeat(" ", width-len(runes))
 }
 
-func truncateVisual(s string, width int) string {
-	if width <= 0 {
-		return ""
-	}
+var unifiedHunkHeaderRe = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
 
-	var b strings.Builder
-	currentWidth := 0
+func parseUnifiedDiffHunks(diffText string) ([]partialHunk, error) {
+	lines := strings.Split(strings.ReplaceAll(strings.ReplaceAll(diffText, "\r\n", "\n"), "\r", "\n"), "\n")
 
-	for _, r := range s {
-		piece := string(r)
-		pieceWidth := lipgloss.Width(piece)
-		if pieceWidth <= 0 {
-			pieceWidth = 1
+	var hunks []partialHunk
+	var current *partialHunk
+
+	flush := func() {
+		if current == nil {
+			return
 		}
 
-		if currentWidth+pieceWidth > width {
+		current.PreviewText = buildHunkPreview(*current, 4)
+		hunks = append(hunks, *current)
+		current = nil
+	}
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "@@ ") {
+			flush()
+
+			oldStart, oldCount, newStart, newCount, err := parseHunkHeader(line)
+			if err != nil {
+				return nil, err
+			}
+
+			current = &partialHunk{
+				Header:   line,
+				OldStart: oldStart,
+				OldCount: oldCount,
+				NewStart: newStart,
+				NewCount: newCount,
+			}
+			continue
+		}
+
+		if current == nil {
+			continue
+		}
+
+		if strings.HasPrefix(line, `\ No newline at end of file`) {
+			continue
+		}
+
+		if line == "" {
+			current.Lines = append(current.Lines, " ")
+			current.Context++
+			continue
+		}
+
+		sign := line[0]
+		if sign != ' ' && sign != '+' && sign != '-' {
+			continue
+		}
+
+		current.Lines = append(current.Lines, line)
+		switch sign {
+		case '+':
+			current.Added++
+		case '-':
+			current.Removed++
+		case ' ':
+			current.Context++
+		}
+	}
+
+	flush()
+
+	return hunks, nil
+}
+
+func parseHunkHeader(header string) (int, int, int, int, error) {
+	m := unifiedHunkHeaderRe.FindStringSubmatch(header)
+	if len(m) == 0 {
+		return 0, 0, 0, 0, fmt.Errorf("invalid hunk header: %s", header)
+	}
+
+	oldStart := atoiDefault(m[1], 0)
+	oldCount := atoiDefault(m[2], 1)
+	newStart := atoiDefault(m[3], 0)
+	newCount := atoiDefault(m[4], 1)
+
+	return oldStart, oldCount, newStart, newCount, nil
+}
+
+func atoiDefault(s string, def int) int {
+	if s == "" {
+		return def
+	}
+
+	var n int
+	if _, err := fmt.Sscanf(s, "%d", &n); err != nil {
+		return def
+	}
+
+	return n
+}
+
+func buildHunkPreview(h partialHunk, maxLines int) string {
+	var out []string
+	for _, line := range h.Lines {
+		if len(out) >= maxLines {
+			out = append(out, "...")
 			break
 		}
 
-		b.WriteRune(r)
-		currentWidth += pieceWidth
+		if line == "" {
+			out = append(out, "")
+			continue
+		}
+
+		prefix := string(line[0])
+		text := ""
+		if len(line) > 1 {
+			text = line[1:]
+		}
+
+		if prefix == " " {
+			continue
+		}
+
+		out = append(out, prefix+" "+strings.TrimSpace(text))
 	}
 
-	return b.String()
+	return strings.Join(out, "\n")
+}
+
+func selectedPartialHunks(hunks []partialHunk) []partialHunk {
+	var selected []partialHunk
+	for _, h := range hunks {
+		if h.Selected {
+			selected = append(selected, h)
+		}
+	}
+	return selected
+}
+
+func splitPatchLines(text string) []string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+
+	if text == "" {
+		return nil
+	}
+
+	lines := strings.Split(text, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	return lines
+}
+
+func joinPatchLines(lines []string, finalNewline bool) string {
+	out := strings.Join(lines, "\n")
+	if finalNewline {
+		out += "\n"
+	}
+	return out
+}
+
+func hasFinalNewline(values ...string) bool {
+	for _, v := range values {
+		if strings.HasSuffix(v, "\n") {
+			return true
+		}
+	}
+	return false
+}
+
+func applySelectedHunksToBase(baseLines []string, hunks []partialHunk) ([]string, error) {
+	result := append([]string(nil), baseLines...)
+
+	sort.Slice(hunks, func(i, j int) bool {
+		return hunks[i].OldStart > hunks[j].OldStart
+	})
+
+	for _, h := range hunks {
+		start := h.OldStart - 1
+		if start < 0 {
+			start = 0
+		}
+
+		end := start + h.OldCount
+		if end > len(result) {
+			return nil, fmt.Errorf("hunk range is outside file: %s", h.Header)
+		}
+
+		newLines := make([]string, 0, h.NewCount)
+		for _, line := range h.Lines {
+			if line == "" {
+				newLines = append(newLines, "")
+				continue
+			}
+
+			sign := line[0]
+			text := ""
+			if len(line) > 1 {
+				text = line[1:]
+			}
+
+			switch sign {
+			case ' ', '+':
+				newLines = append(newLines, text)
+			case '-':
+				// Removed lines do not go into the selected target content.
+			}
+		}
+
+		updated := make([]string, 0, len(result)-h.OldCount+len(newLines))
+		updated = append(updated, result[:start]...)
+		updated = append(updated, newLines...)
+		updated = append(updated, result[end:]...)
+		result = updated
+	}
+
+	return result, nil
 }
 
 func selectedCommitItems(items []commitItem) []commitItem {
