@@ -455,7 +455,7 @@ Config file:
 Example:
 
   path=/home/user/dev/
-  username=h.bence
+  username=user
   password=YOUR_PASSWORD_HERE
   branch_username=user
 
