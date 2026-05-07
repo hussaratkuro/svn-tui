@@ -290,8 +290,15 @@ func main() {
 func loadRepos() []repo {
 	var configs []repoConfig
 
-	configPath := filepath.Join(os.Getenv("HOME"), ".config", "svn-tui", "repo.txt")
-	configs = append(configs, loadRepoConfigFile(configPath)...)
+	if configDir, err := os.UserConfigDir(); err == nil {
+		configPath := filepath.Join(configDir, "svn-tui", "repo.txt")
+		configs = append(configs, loadRepoConfigFile(configPath)...)
+	}
+
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		configPath := filepath.Join(homeDir, ".config", "svn-tui", "repo.txt")
+		configs = append(configs, loadRepoConfigFile(configPath)...)
+	}
 
 	if len(configs) == 0 {
 		if len(os.Args) > 1 {
