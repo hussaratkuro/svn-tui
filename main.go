@@ -27,8 +27,10 @@ const (
 	screenBranchSelect
 	screenCommitSelect
 	screenCommitMessageInput
+	screenRevertSelect
 	screenConflictSelect
 	screenHistory
+	screenDiff
 	screenRunning
 	screenResult
 )
@@ -38,6 +40,7 @@ type action int
 const (
 	actionPull action = iota
 	actionStatus
+	actionRevertFiles
 	actionCommit
 	actionCreateBranch
 	actionSwitchBranch
@@ -71,9 +74,10 @@ type branch struct {
 }
 
 type commitItem struct {
-	Status   string
-	Path     string
-	Selected bool
+	Status      string
+	Path        string
+	Selected    bool
+	Unversioned bool
 }
 
 type conflictItem struct {
@@ -106,6 +110,17 @@ type conflictItemsLoadedMsg struct {
 type historyLoadedMsg struct {
 	Output string
 	Err    error
+}
+
+type revertItemsLoadedMsg struct {
+	Items []commitItem
+	Err   error
+}
+
+type diffLoadedMsg struct {
+	Output string
+	Err    error
+	Path   string
 }
 
 type model struct {
@@ -156,7 +171,7 @@ var (
 	catText      = lipgloss.Color("#cdd6f4")
 	catSubtext0  = lipgloss.Color("#a6adc8")
 	catSapphire  = lipgloss.Color("#74c7ec")
-	catTeal  = lipgloss.Color("#94e2d5")
+	catTeal      = lipgloss.Color("#94e2d5")
 
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
@@ -200,8 +215,8 @@ var (
 			Bold(true)
 
 	labelYellowStyle = lipgloss.NewStyle().
-			Foreground(catYellow).
-			Bold(true)
+				Foreground(catYellow).
+				Bold(true)
 
 	valueWhiteStyle = lipgloss.NewStyle().
 			Foreground(catRosewater)
@@ -212,6 +227,18 @@ var (
 	actionSelectedStyle = lipgloss.NewStyle().
 				Foreground(catMauve).
 				Bold(true)
+
+	diffAddedStyle = lipgloss.NewStyle().
+			Foreground(catGreen)
+
+	diffDeletedStyle = lipgloss.NewStyle().
+				Foreground(catRed)
+
+	diffModifiedStyle = lipgloss.NewStyle().
+				Foreground(catYellow)
+
+	diffSameStyle = lipgloss.NewStyle().
+			Foreground(catSubtext0)
 )
 
 func main() {
@@ -231,6 +258,7 @@ func main() {
 		actions: []string{
 			"Pull",
 			"Status",
+			"Revert files",
 			"Commit",
 			"Create branch",
 			"Switch to branch",
@@ -488,6 +516,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = screenCommitSelect
 		return m, nil
 
+	case revertItemsLoadedMsg:
+		if msg.Err != nil {
+			m.screen = screenResult
+			m.err = msg.Err
+			m.result = "Failed to load working copy changes."
+			m.viewport.SetContent(m.result + "\n\n" + msg.Err.Error())
+			return m, nil
+		}
+
+		if len(msg.Items) == 0 {
+			m.screen = screenResult
+			m.err = nil
+			m.result = "No revertable changes found."
+			m.viewport.SetContent(m.result)
+			return m, nil
+		}
+
+		m.commitItems = msg.Items
+		m.commitCursor = 0
+		m.commitOffset = 0
+		m.screen = screenRevertSelect
+		return m, nil
+
 	case conflictItemsLoadedMsg:
 		if msg.Err != nil {
 			m.screen = screenResult
@@ -519,6 +570,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.SetContent("Failed to load commit history.\n\n" + msg.Output + "\n\n" + msg.Err.Error())
 		} else {
 			m.viewport.SetContent(msg.Output)
+		}
+
+		m.viewport.GotoTop()
+		return m, nil
+
+	case diffLoadedMsg:
+		m.screen = screenDiff
+		m.err = msg.Err
+
+		if msg.Err != nil {
+			m.viewport.SetContent("Failed to load side-by-side diff for:\n" + msg.Path + "\n\n" + msg.Output + "\n\n" + msg.Err.Error())
+		} else {
+			if strings.TrimSpace(msg.Output) == "" {
+				m.viewport.SetContent("No diff found for:\n" + msg.Path)
+			} else {
+				m.viewport.SetContent(msg.Output)
+			}
 		}
 
 		m.viewport.GotoTop()
@@ -558,7 +626,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	if m.screen == screenResult || m.screen == screenHistory {
+	if m.screen == screenResult || m.screen == screenHistory || m.screen == screenDiff {
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		return m, cmd
@@ -591,11 +659,19 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case screenActionSelect:
 			m.screen = screenRepoSelect
 
+		case screenDiff:
+			if m.selectedAction == actionRevertFiles {
+				m.screen = screenRevertSelect
+			} else {
+				m.screen = screenCommitSelect
+			}
+
 		case screenCreateBranchInput,
 			screenCheckoutRevisionInput,
 			screenBranchSelect,
 			screenCommitSelect,
 			screenCommitMessageInput,
+			screenRevertSelect,
 			screenConflictSelect,
 			screenHistory,
 			screenResult:
@@ -627,6 +703,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case screenCommitMessageInput:
 		return m.updateCommitMessageInput(msg)
 
+	case screenRevertSelect:
+		return m.updateRevertSelect(msg)
+
 	case screenConflictSelect:
 		return m.updateConflictSelect(msg)
 
@@ -638,7 +717,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.viewport.SetContent("")
 		}
 
-	case screenHistory:
+	case screenHistory, screenDiff:
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		return m, cmd
@@ -727,6 +806,11 @@ func (m model) updateActionSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = screenRunning
 			m.runningTitle = "Loading status..."
 			return m, statusCmd(m.activeRepo)
+
+		case actionRevertFiles:
+			m.screen = screenRunning
+			m.runningTitle = "Loading revertable files..."
+			return m, loadRevertItemsCmd(m.activeRepo)
 
 		case actionCheckoutRevision:
 			m.input.Reset()
@@ -912,8 +996,19 @@ func (m model) updateCommitSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.commitItems[i].Selected = false
 		}
 
+	case "d":
+		if len(m.commitItems) == 0 {
+			return m, nil
+		}
+
+		item := m.commitItems[m.commitCursor]
+
+		m.screen = screenRunning
+		m.runningTitle = "Loading side-by-side diff..."
+		return m, diffCmd(m.activeRepo, item, m.viewport.Width)
+
 	case "enter":
-		if len(selectedCommitPaths(m.commitItems)) == 0 {
+		if len(selectedCommitItems(m.commitItems)) == 0 {
 			m.screen = screenResult
 			m.err = fmt.Errorf("no files selected")
 			m.result = "Select at least one file with Space before committing."
@@ -925,6 +1020,79 @@ func (m model) updateCommitSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.input.Placeholder = "Commit message"
 		m.input.Focus()
 		m.screen = screenCommitMessageInput
+	}
+
+	m.commitOffset = adjustOffset(m.commitOffset, m.commitCursor, visible)
+
+	return m, nil
+}
+
+func (m model) updateRevertSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visible := m.visibleListCount(10)
+
+	switch msg.String() {
+	case "up", "k":
+		if m.commitCursor > 0 {
+			m.commitCursor--
+		}
+
+	case "down", "j":
+		if m.commitCursor < len(m.commitItems)-1 {
+			m.commitCursor++
+		}
+
+	case "pgup":
+		m.commitCursor = max(0, m.commitCursor-visible)
+
+	case "pgdown":
+		m.commitCursor = min(len(m.commitItems)-1, m.commitCursor+visible)
+
+	case "home":
+		m.commitCursor = 0
+
+	case "end":
+		m.commitCursor = len(m.commitItems) - 1
+
+	case " ":
+		if len(m.commitItems) > 0 {
+			m.commitItems[m.commitCursor].Selected = !m.commitItems[m.commitCursor].Selected
+		}
+
+	case "a":
+		for i := range m.commitItems {
+			m.commitItems[i].Selected = true
+		}
+
+	case "n":
+		for i := range m.commitItems {
+			m.commitItems[i].Selected = false
+		}
+
+	case "d":
+		if len(m.commitItems) == 0 {
+			return m, nil
+		}
+
+		item := m.commitItems[m.commitCursor]
+
+		m.screen = screenRunning
+		m.runningTitle = "Loading side-by-side diff..."
+		return m, diffCmd(m.activeRepo, item, m.viewport.Width)
+
+	case "enter":
+		paths := selectedCommitPaths(m.commitItems)
+
+		if len(paths) == 0 {
+			m.screen = screenResult
+			m.err = fmt.Errorf("no files selected")
+			m.result = "Select at least one file with Space before reverting."
+			m.viewport.SetContent(m.result + "\n\n" + m.err.Error())
+			return m, nil
+		}
+
+		m.screen = screenRunning
+		m.runningTitle = "Reverting selected files..."
+		return m, revertCmd(m.activeRepo, paths)
 	}
 
 	m.commitOffset = adjustOffset(m.commitOffset, m.commitCursor, visible)
@@ -944,11 +1112,11 @@ func (m model) updateCommitMessageInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		paths := selectedCommitPaths(m.commitItems)
+		items := selectedCommitItems(m.commitItems)
 
 		m.screen = screenRunning
 		m.runningTitle = "Committing selected files..."
-		return m, commitCmd(m.activeRepo, paths, message)
+		return m, commitCmd(m.activeRepo, items, message)
 	}
 
 	var cmd tea.Cmd
@@ -1019,11 +1187,17 @@ func (m model) View() string {
 	case screenCommitMessageInput:
 		return m.viewCommitMessageInput()
 
+	case screenRevertSelect:
+		return m.viewRevertSelect()
+
 	case screenConflictSelect:
 		return m.viewConflictSelect()
 
 	case screenHistory:
 		return m.viewHistory()
+
+	case screenDiff:
+		return m.viewDiff()
 
 	case screenRunning:
 		return m.viewRunning()
@@ -1171,9 +1345,61 @@ func (m model) viewBranchSelect() string {
 func (m model) viewCommitSelect() string {
 	var b strings.Builder
 
-	selectedCount := len(selectedCommitPaths(m.commitItems))
+	selectedCount := len(selectedCommitItems(m.commitItems))
+	unversionedCount := len(selectedUnversionedCommitPaths(m.commitItems))
 
 	b.WriteString(repoInfoHeader("Commit", m.activeRepo))
+	b.WriteString(mutedStyle.Render(fmt.Sprintf("Selected files: %d | Selected unversioned files that will be svn add-ed first: %d", selectedCount, unversionedCount)) + "\n\n")
+	b.WriteString(textStyle.Render("Working copy changes:") + "\n")
+	b.WriteString(mutedStyle.Render("---------------------") + "\n")
+
+	visible := m.visibleListCount(12)
+	end := min(len(m.commitItems), m.commitOffset+visible)
+
+	for i := m.commitOffset; i < end; i++ {
+		item := m.commitItems[i]
+
+		cursor := " "
+		lineStyle := normalStyle
+
+		if i == m.commitCursor {
+			cursor = ">"
+			lineStyle = selectedStyle
+		}
+
+		check := checkboxStyle.Render("[ ]")
+		if item.Selected {
+			check = checkedStyle.Render("[x]")
+		}
+
+		status := item.Status
+		if item.Unversioned {
+			status = "? add"
+		}
+
+		line := fmt.Sprintf("%s %s %-8s %s", cursor, check, status, item.Path)
+
+		if item.Selected && i != m.commitCursor {
+			b.WriteString(checkedStyle.Render(line) + "\n")
+		} else {
+			b.WriteString(lineStyle.Render(line) + "\n")
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render(scrollHint(m.commitOffset, end, len(m.commitItems))) + "\n")
+	b.WriteString(mutedStyle.Render("Space: select | a: all | n: none | d: side-by-side diff | Enter: commit message | Esc: back"))
+
+	return b.String()
+}
+
+func (m model) viewRevertSelect() string {
+	var b strings.Builder
+
+	selectedCount := len(selectedCommitPaths(m.commitItems))
+
+	b.WriteString(repoInfoHeader("Revert files", m.activeRepo))
+	b.WriteString(warningStyle.Render("Warning: SVN revert discards local changes for selected versioned files.") + "\n")
 	b.WriteString(mutedStyle.Render(fmt.Sprintf("Selected files: %d", selectedCount)) + "\n\n")
 	b.WriteString(textStyle.Render("Working copy changes:") + "\n")
 	b.WriteString(mutedStyle.Render("---------------------") + "\n")
@@ -1208,7 +1434,7 @@ func (m model) viewCommitSelect() string {
 
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render(scrollHint(m.commitOffset, end, len(m.commitItems))) + "\n")
-	b.WriteString(mutedStyle.Render("Space: select | a: select all | n: select none | Enter: commit message | Esc: back"))
+	b.WriteString(mutedStyle.Render("Space: select | a: all | n: none | d: side-by-side diff | Enter: revert selected | Esc: back"))
 
 	return b.String()
 }
@@ -1216,18 +1442,28 @@ func (m model) viewCommitSelect() string {
 func (m model) viewCommitMessageInput() string {
 	var b strings.Builder
 
-	paths := selectedCommitPaths(m.commitItems)
+	items := selectedCommitItems(m.commitItems)
 
 	b.WriteString(repoInfoHeader("Commit message", m.activeRepo))
-	b.WriteString(mutedStyle.Render(fmt.Sprintf("Files selected: %d", len(paths))) + "\n\n")
+	b.WriteString(mutedStyle.Render(fmt.Sprintf("Files selected: %d", len(items))) + "\n\n")
 
-	previewLimit := min(8, len(paths))
+	previewLimit := min(8, len(items))
 	for i := 0; i < previewLimit; i++ {
-		b.WriteString(mutedStyle.Render("  "+paths[i]) + "\n")
+		prefix := "  "
+		if items[i].Unversioned {
+			prefix = "  + "
+		}
+
+		b.WriteString(mutedStyle.Render(prefix+items[i].Path) + "\n")
 	}
 
-	if len(paths) > previewLimit {
-		b.WriteString(mutedStyle.Render(fmt.Sprintf("  ... and %d more", len(paths)-previewLimit)) + "\n")
+	if len(items) > previewLimit {
+		b.WriteString(mutedStyle.Render(fmt.Sprintf("  ... and %d more", len(items)-previewLimit)) + "\n")
+	}
+
+	if len(selectedUnversionedCommitPaths(m.commitItems)) > 0 {
+		b.WriteString("\n")
+		b.WriteString(warningStyle.Render("Selected unversioned files will be added with svn add before commit.") + "\n")
 	}
 
 	b.WriteString("\n")
@@ -1276,6 +1512,17 @@ func (m model) viewHistory() string {
 
 	b.WriteString(repoInfoHeader("Commit history", m.activeRepo))
 	b.WriteString(mutedStyle.Render("↑/↓: scroll | PgUp/PgDn: page | Home/End: jump | Esc: back | q: quit") + "\n\n")
+	b.WriteString(textStyle.Render(m.viewport.View()))
+
+	return b.String()
+}
+
+func (m model) viewDiff() string {
+	var b strings.Builder
+
+	b.WriteString(repoInfoHeader("Side-by-side diff viewer", m.activeRepo))
+	b.WriteString(mutedStyle.Render("Legend: = same | - removed/old | + added/new | ~ changed") + "\n")
+	b.WriteString(mutedStyle.Render("↑/↓: scroll | PgUp/PgDn: page | Home/End: jump | Esc: back") + "\n\n")
 	b.WriteString(textStyle.Render(m.viewport.View()))
 
 	return b.String()
@@ -1371,7 +1618,7 @@ func loadBranches(r repo) ([]branch, error) {
 
 func loadCommitItemsCmd(r repo) tea.Cmd {
 	return func() tea.Msg {
-		items, err := loadCommitItems(r)
+		items, err := loadCommitItems(r, true)
 
 		return commitItemsLoadedMsg{
 			Items: items,
@@ -1380,7 +1627,18 @@ func loadCommitItemsCmd(r repo) tea.Cmd {
 	}
 }
 
-func loadCommitItems(r repo) ([]commitItem, error) {
+func loadRevertItemsCmd(r repo) tea.Cmd {
+	return func() tea.Msg {
+		items, err := loadCommitItems(r, false)
+
+		return revertItemsLoadedMsg{
+			Items: items,
+			Err:   err,
+		}
+	}
+}
+
+func loadCommitItems(r repo, includeUnversioned bool) ([]commitItem, error) {
 	out, err := svn(r, "status")
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -1417,18 +1675,24 @@ func loadCommitItems(r repo) ([]commitItem, error) {
 			continue
 		}
 
-		if strings.HasPrefix(status, "?") {
+		unversioned := strings.HasPrefix(status, "?")
+		if unversioned && !includeUnversioned {
 			continue
 		}
 
 		items = append(items, commitItem{
-			Status:   status,
-			Path:     path,
-			Selected: false,
+			Status:      status,
+			Path:        path,
+			Selected:    false,
+			Unversioned: unversioned,
 		})
 	}
 
 	sort.Slice(items, func(i, j int) bool {
+		if items[i].Unversioned != items[j].Unversioned {
+			return !items[i].Unversioned && items[j].Unversioned
+		}
+
 		return items[i].Path < items[j].Path
 	})
 
@@ -1748,16 +2012,43 @@ func checkoutRevisionCmd(r repo, revision string) tea.Cmd {
 	}
 }
 
-func commitCmd(r repo, paths []string, message string) tea.Cmd {
+func commitCmd(r repo, items []commitItem, message string) tea.Cmd {
 	return func() tea.Msg {
 		var output strings.Builder
+
+		paths := commitItemPaths(items)
+		unversionedPaths := unversionedItemPaths(items)
 
 		output.WriteString("Working copy: " + r.Path + "\n")
 		output.WriteString("Commit message: " + message + "\n")
 		output.WriteString("Selected files:\n")
 
-		for _, p := range paths {
-			output.WriteString("  " + p + "\n")
+		for _, item := range items {
+			prefix := "  "
+			if item.Unversioned {
+				prefix = "  + "
+			}
+			output.WriteString(prefix + item.Path + "\n")
+		}
+
+		if len(unversionedPaths) > 0 {
+			output.WriteString("\nAdding selected unversioned files before commit...\n\n")
+
+			addArgs := []string{"add", "--parents"}
+			addArgs = append(addArgs, unversionedPaths...)
+
+			addOut, err := svn(r, addArgs...)
+			output.WriteString(addOut)
+
+			if err != nil {
+				return commandResult{
+					Output:          output.String(),
+					Err:             err,
+					CurrentLocation: getCurrentLocation(r),
+				}
+			}
+
+			output.WriteString("\nUnversioned files added successfully.\n")
 		}
 
 		output.WriteString("\nRunning commit...\n\n")
@@ -1771,6 +2062,71 @@ func commitCmd(r repo, paths []string, message string) tea.Cmd {
 
 		if err == nil {
 			output.WriteString("\nCommit finished successfully.")
+		}
+
+		return commandResult{
+			Output:          output.String(),
+			Err:             err,
+			CurrentLocation: getCurrentLocation(r),
+		}
+	}
+}
+
+func diffCmd(r repo, item commitItem, width int) tea.Cmd {
+	return func() tea.Msg {
+		out, err := buildSideBySideDiff(r, item, width)
+
+		if err != nil {
+			fallbackOut, fallbackErr := svn(r, "diff", item.Path)
+			if fallbackOut != "" {
+				out += "\n\nUnified svn diff fallback:\n\n" + fallbackOut
+			}
+
+			if fallbackErr != nil {
+				err = fmt.Errorf("%w\n\nfallback svn diff also failed: %v", err, fallbackErr)
+			}
+
+			return diffLoadedMsg{
+				Output: out,
+				Err: fmt.Errorf(
+					"side-by-side diff failed\n\nWorking copy: %s\nPath: %s\n\nError: %w",
+					r.Path,
+					item.Path,
+					err,
+				),
+				Path: item.Path,
+			}
+		}
+
+		return diffLoadedMsg{
+			Output: out,
+			Err:    nil,
+			Path:   item.Path,
+		}
+	}
+}
+
+func revertCmd(r repo, paths []string) tea.Cmd {
+	return func() tea.Msg {
+		var output strings.Builder
+
+		output.WriteString("Working copy: " + r.Path + "\n")
+		output.WriteString("Selected files to revert:\n")
+
+		for _, p := range paths {
+			output.WriteString("  " + p + "\n")
+		}
+
+		output.WriteString("\nRunning revert...\n\n")
+
+		args := []string{"revert"}
+		args = append(args, paths...)
+
+		out, err := svn(r, args...)
+		output.WriteString(out)
+
+		if err == nil {
+			output.WriteString("\nRevert finished successfully.")
 		}
 
 		return commandResult{
@@ -1938,11 +2294,589 @@ func loadHistoryCmd(r repo) tea.Cmd {
 	}
 }
 
+func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
+	if width <= 0 {
+		width = 160
+	}
+
+	if isLikelyDirectory(r, item.Path) {
+		out, err := svn(r, "diff", item.Path)
+		if err != nil {
+			return "", err
+		}
+
+		return "Directory diff uses unified SVN diff output:\n\n" + out, nil
+	}
+
+	var oldText string
+	var newText string
+	var err error
+
+	if item.Unversioned || strings.HasPrefix(item.Status, "?") || strings.HasPrefix(item.Status, "A") {
+		oldText = ""
+		newText, err = readWorkingFile(r, item.Path)
+		if err != nil {
+			return "", err
+		}
+	} else if strings.HasPrefix(item.Status, "D") {
+		oldText, err = readBaseFile(r, item.Path)
+		if err != nil {
+			return "", err
+		}
+		newText = ""
+	} else {
+		oldText, err = readBaseFile(r, item.Path)
+		if err != nil {
+			return "", err
+		}
+
+		newText, err = readWorkingFile(r, item.Path)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	oldLines := splitLinesForDiff(oldText)
+	newLines := splitLinesForDiff(newText)
+	allRows := sideBySideRowsRaw(oldLines, newLines)
+	stats := diffLineStats(allRows)
+	rows := compactUnchangedRows(allRows, 4)
+
+	lineNumberWidth := max(4, len(fmt.Sprintf("%d", max(len(oldLines), len(newLines)))))
+	sideGutterWidth := lineNumberWidth + 3
+	contentWidth := max(24, (width-7-(sideGutterWidth*2))/2)
+
+	if contentWidth > 90 {
+		contentWidth = 90
+	}
+
+	leftWidth := sideGutterWidth + contentWidth
+	rightWidth := leftWidth
+
+	var b strings.Builder
+
+	b.WriteString("Path: " + item.Path + "\n")
+	b.WriteString("Status: " + item.Status + "\n")
+	b.WriteString(fmt.Sprintf("Line count: old/base %d | new/working %d\n", len(oldLines), len(newLines)))
+	b.WriteString(fmt.Sprintf("Diff summary: +%d added | -%d removed | ~%d changed | =%d unchanged\n", stats.Added, stats.Removed, stats.Modified, stats.Same))
+	b.WriteString(fmt.Sprintf("Line numbers: left = old/base file | right = new/working copy\n"))
+	if item.Unversioned {
+		b.WriteString("Note: unversioned file, left side is empty. It will be svn add-ed before commit if selected.\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(padRight(formatDiffCellHeader("OLD / BASE", len(oldLines), lineNumberWidth, contentWidth), leftWidth) + " │ Δ │ " + padRight(formatDiffCellHeader("NEW / WORKING COPY", len(newLines), lineNumberWidth, contentWidth), rightWidth) + "\n")
+	b.WriteString(strings.Repeat("─", leftWidth) + "─┼───┼─" + strings.Repeat("─", rightWidth) + "\n")
+
+	if len(rows) == 0 {
+		b.WriteString(renderDiffLine(0, "", "=", 0, "", lineNumberWidth, contentWidth) + "\n")
+		return b.String(), nil
+	}
+
+	for _, row := range rows {
+		leftWrapped := wrapLine(row.Left, contentWidth)
+		rightWrapped := wrapLine(row.Right, contentWidth)
+
+		maxParts := max(len(leftWrapped), len(rightWrapped))
+		for i := 0; i < maxParts; i++ {
+			left := ""
+			right := ""
+			oldLine := 0
+			newLine := 0
+
+			if i < len(leftWrapped) {
+				left = leftWrapped[i]
+			}
+			if i < len(rightWrapped) {
+				right = rightWrapped[i]
+			}
+
+			marker := row.Marker
+			if i == 0 {
+				oldLine = row.OldLine
+				newLine = row.NewLine
+			} else {
+				marker = " "
+			}
+
+			b.WriteString(renderDiffLine(oldLine, left, marker, newLine, right, lineNumberWidth, contentWidth, row.Marker) + "\n")
+		}
+	}
+
+	return b.String(), nil
+}
+
+type diffRow struct {
+	Left    string
+	Right   string
+	Marker  string
+	OldLine int
+	NewLine int
+}
+
+func sideBySideRowsRaw(oldLines []string, newLines []string) []diffRow {
+	n := len(oldLines)
+	m := len(newLines)
+
+	dp := make([][]int, n+1)
+	for i := range dp {
+		dp[i] = make([]int, m+1)
+	}
+
+	for i := n - 1; i >= 0; i-- {
+		for j := m - 1; j >= 0; j-- {
+			if oldLines[i] == newLines[j] {
+				dp[i][j] = dp[i+1][j+1] + 1
+			} else if dp[i+1][j] >= dp[i][j+1] {
+				dp[i][j] = dp[i+1][j]
+			} else {
+				dp[i][j] = dp[i][j+1]
+			}
+		}
+	}
+
+	var rows []diffRow
+
+	i := 0
+	j := 0
+
+	for i < n && j < m {
+		if oldLines[i] == newLines[j] {
+			rows = append(rows, diffRow{
+				Left:    oldLines[i],
+				Right:   newLines[j],
+				Marker:  "=",
+				OldLine: i + 1,
+				NewLine: j + 1,
+			})
+			i++
+			j++
+			continue
+		}
+
+		if i+1 < n && oldLines[i+1] == newLines[j] {
+			rows = append(rows, diffRow{
+				Left:    oldLines[i],
+				Right:   "",
+				Marker:  "-",
+				OldLine: i + 1,
+				NewLine: 0,
+			})
+			i++
+			continue
+		}
+
+		if j+1 < m && oldLines[i] == newLines[j+1] {
+			rows = append(rows, diffRow{
+				Left:    "",
+				Right:   newLines[j],
+				Marker:  "+",
+				OldLine: 0,
+				NewLine: j + 1,
+			})
+			j++
+			continue
+		}
+
+		if dp[i+1][j] > dp[i][j+1] {
+			rows = append(rows, diffRow{
+				Left:    oldLines[i],
+				Right:   "",
+				Marker:  "-",
+				OldLine: i + 1,
+				NewLine: 0,
+			})
+			i++
+		} else if dp[i][j+1] > dp[i+1][j] {
+			rows = append(rows, diffRow{
+				Left:    "",
+				Right:   newLines[j],
+				Marker:  "+",
+				OldLine: 0,
+				NewLine: j + 1,
+			})
+			j++
+		} else {
+			rows = append(rows, diffRow{
+				Left:    oldLines[i],
+				Right:   newLines[j],
+				Marker:  "~",
+				OldLine: i + 1,
+				NewLine: j + 1,
+			})
+			i++
+			j++
+		}
+	}
+
+	for i < n {
+		rows = append(rows, diffRow{
+			Left:    oldLines[i],
+			Right:   "",
+			Marker:  "-",
+			OldLine: i + 1,
+			NewLine: 0,
+		})
+		i++
+	}
+
+	for j < m {
+		rows = append(rows, diffRow{
+			Left:    "",
+			Right:   newLines[j],
+			Marker:  "+",
+			OldLine: 0,
+			NewLine: j + 1,
+		})
+		j++
+	}
+
+	return rows
+}
+
+type diffStats struct {
+	Added    int
+	Removed  int
+	Modified int
+	Same     int
+}
+
+func diffLineStats(rows []diffRow) diffStats {
+	var stats diffStats
+
+	for _, row := range rows {
+		switch row.Marker {
+		case "+":
+			stats.Added++
+		case "-":
+			stats.Removed++
+		case "~":
+			stats.Modified++
+		case "=":
+			stats.Same++
+		}
+	}
+
+	return stats
+}
+
+func renderDiffLine(oldLine int, left string, marker string, newLine int, right string, lineNumberWidth int, contentWidth int, styleMarker ...string) string {
+	styleKey := marker
+	if len(styleMarker) > 0 && styleMarker[0] != "" {
+		styleKey = styleMarker[0]
+	}
+
+	leftCell := formatDiffCell(oldLine, left, lineNumberWidth, contentWidth)
+	markerCell := marker
+	rightCell := formatDiffCell(newLine, right, lineNumberWidth, contentWidth)
+
+	switch styleKey {
+	case "+":
+		markerCell = diffAddedStyle.Render(markerCell)
+		rightCell = diffAddedStyle.Render(rightCell)
+	case "-":
+		leftCell = diffDeletedStyle.Render(leftCell)
+		markerCell = diffDeletedStyle.Render(markerCell)
+	case "~":
+		leftCell = diffModifiedStyle.Render(leftCell)
+		markerCell = diffModifiedStyle.Render(markerCell)
+		rightCell = diffModifiedStyle.Render(rightCell)
+	case "=":
+		leftCell = diffSameStyle.Render(leftCell)
+		markerCell = diffSameStyle.Render(markerCell)
+		rightCell = diffSameStyle.Render(rightCell)
+	}
+
+	return leftCell + " │ " + markerCell + " │ " + rightCell
+}
+
+func formatDiffCell(lineNumber int, text string, lineNumberWidth int, contentWidth int) string {
+	return formatLineNumber(lineNumber, lineNumberWidth) + " │ " + padRight(text, contentWidth)
+}
+
+func formatDiffCellHeader(label string, lineCount int, lineNumberWidth int, contentWidth int) string {
+	return padRight("line", lineNumberWidth) + " │ " + padRight(fmt.Sprintf("%s (%d lines)", label, lineCount), contentWidth)
+}
+
+func formatLineNumber(lineNumber int, width int) string {
+	if lineNumber <= 0 {
+		return strings.Repeat(" ", width)
+	}
+
+	return fmt.Sprintf("%*d", width, lineNumber)
+}
+
+func compactUnchangedRows(rows []diffRow, context int) []diffRow {
+	if len(rows) == 0 {
+		return rows
+	}
+
+	changed := make([]bool, len(rows))
+	for i, row := range rows {
+		if row.Marker != "=" {
+			from := max(0, i-context)
+			to := min(len(rows)-1, i+context)
+
+			for j := from; j <= to; j++ {
+				changed[j] = true
+			}
+		}
+	}
+
+	hasChanges := false
+	for _, row := range rows {
+		if row.Marker != "=" {
+			hasChanges = true
+			break
+		}
+	}
+
+	if !hasChanges {
+		return rows
+	}
+
+	var out []diffRow
+	hidden := false
+
+	for i, row := range rows {
+		if changed[i] {
+			if hidden {
+				out = append(out, diffRow{
+					Left:    "...",
+					Right:   "...",
+					Marker:  " ",
+					OldLine: 0,
+					NewLine: 0,
+				})
+				hidden = false
+			}
+
+			out = append(out, row)
+		} else {
+			hidden = true
+		}
+	}
+
+	if hidden {
+		out = append(out, diffRow{
+			Left:    "...",
+			Right:   "...",
+			Marker:  " ",
+			OldLine: 0,
+			NewLine: 0,
+		})
+	}
+
+	return out
+}
+
+func readBaseFile(r repo, path string) (string, error) {
+	out, err := svn(r, "cat", path)
+	if err != nil {
+		return "", err
+	}
+
+	return out, nil
+}
+
+func readWorkingFile(r repo, path string) (string, error) {
+	fullPath := filepath.Join(r.Path, filepath.FromSlash(path))
+
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		return "", err
+	}
+
+	return string(data), nil
+}
+
+func isLikelyDirectory(r repo, path string) bool {
+	fullPath := filepath.Join(r.Path, filepath.FromSlash(path))
+	info, err := os.Stat(fullPath)
+	if err != nil {
+		return false
+	}
+
+	return info.IsDir()
+}
+
+func splitLinesForDiff(text string) []string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+
+	if text == "" {
+		return nil
+	}
+
+	lines := strings.Split(text, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	for i := range lines {
+		lines[i] = expandTabs(lines[i], 4)
+	}
+
+	return lines
+}
+
+func expandTabs(s string, tabWidth int) string {
+	if tabWidth <= 0 {
+		tabWidth = 4
+	}
+
+	var b strings.Builder
+	column := 0
+
+	for _, r := range s {
+		if r == '\t' {
+			spaces := tabWidth - (column % tabWidth)
+			if spaces == 0 {
+				spaces = tabWidth
+			}
+
+			b.WriteString(strings.Repeat(" ", spaces))
+			column += spaces
+			continue
+		}
+
+		b.WriteRune(r)
+
+		w := lipgloss.Width(string(r))
+		if w <= 0 {
+			w = 1
+		}
+
+		column += w
+	}
+
+	return b.String()
+}
+
+func wrapLine(s string, width int) []string {
+	if width <= 0 {
+		return []string{s}
+	}
+
+	if s == "" {
+		return []string{""}
+	}
+
+	var parts []string
+	var b strings.Builder
+	currentWidth := 0
+
+	for _, r := range s {
+		piece := string(r)
+		pieceWidth := lipgloss.Width(piece)
+		if pieceWidth <= 0 {
+			pieceWidth = 1
+		}
+
+		if currentWidth > 0 && currentWidth+pieceWidth > width {
+			parts = append(parts, b.String())
+			b.Reset()
+			currentWidth = 0
+		}
+
+		b.WriteRune(r)
+		currentWidth += pieceWidth
+	}
+
+	parts = append(parts, b.String())
+
+	return parts
+}
+
+func padRight(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+
+	currentWidth := lipgloss.Width(s)
+	if currentWidth > width {
+		return truncateVisual(s, width)
+	}
+
+	return s + strings.Repeat(" ", width-currentWidth)
+}
+
+func truncateVisual(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	currentWidth := 0
+
+	for _, r := range s {
+		piece := string(r)
+		pieceWidth := lipgloss.Width(piece)
+		if pieceWidth <= 0 {
+			pieceWidth = 1
+		}
+
+		if currentWidth+pieceWidth > width {
+			break
+		}
+
+		b.WriteRune(r)
+		currentWidth += pieceWidth
+	}
+
+	return b.String()
+}
+
+func selectedCommitItems(items []commitItem) []commitItem {
+	var selected []commitItem
+
+	for _, item := range items {
+		if item.Selected {
+			selected = append(selected, item)
+		}
+	}
+
+	return selected
+}
+
 func selectedCommitPaths(items []commitItem) []string {
 	var paths []string
 
 	for _, item := range items {
 		if item.Selected {
+			paths = append(paths, item.Path)
+		}
+	}
+
+	return paths
+}
+
+func selectedUnversionedCommitPaths(items []commitItem) []string {
+	var paths []string
+
+	for _, item := range items {
+		if item.Selected && item.Unversioned {
+			paths = append(paths, item.Path)
+		}
+	}
+
+	return paths
+}
+
+func commitItemPaths(items []commitItem) []string {
+	var paths []string
+
+	for _, item := range items {
+		paths = append(paths, item.Path)
+	}
+
+	return paths
+}
+
+func unversionedItemPaths(items []commitItem) []string {
+	var paths []string
+
+	for _, item := range items {
+		if item.Unversioned {
 			paths = append(paths, item.Path)
 		}
 	}

@@ -1,0 +1,7 @@
+path=/path/to/repo
+username=user@example.com
+password=password
+branch_username=user
+
+# windows path: C:\Users\<user>\.config\svn-tui\repo.txt
+# linux path: $HOME/.config/svn-tui/repo.txt
