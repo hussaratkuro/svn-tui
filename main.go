@@ -447,10 +447,10 @@ Config file:
 
 Example:
 
-  path=/home/hussar/dev/svn/ehaz
+  path=/home/user/dev/
   username=h.bence
   password=YOUR_PASSWORD_HERE
-  branch_username=hussar
+  branch_username=user
 
 Important:
 
