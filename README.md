@@ -208,24 +208,24 @@ Create a config file at:
 Example:
 
 ```ini
-path=/home/hussar/dev/svn/ehaz
-username=h.bence
+path=/home/user/dev/
+username=user
 password=YOUR_PASSWORD_HERE
-branch_username=hussar
+branch_username=user
 ```
 
 Multiple repositories can be configured by separating blocks with an empty line:
 
 ```ini
-path=/home/hussar/dev/svn/ehaz
-username=h.bence
+path=/home/user/dev/
+username=user
 password=YOUR_PASSWORD_HERE
-branch_username=hussar
+branch_username=user
 
-path=/home/hussar/dev/svn/another-project
-username=h.bence
+path=/home/user/dev/svn/another-project
+username=user
 password=YOUR_PASSWORD_HERE
-branch_username=hussar
+branch_username=user
 ```
 
 Recommended permissions:
@@ -254,11 +254,11 @@ If no config file exists, `svn-tui` tries these sources:
 Examples:
 
 ```bash
-svn-tui /home/hussar/dev/svn/ehaz
+svn-tui /home/user/dev/
 ```
 
 ```bash
-SVN_TUI_REPOS="/home/hussar/dev/svn/ehaz:/home/hussar/dev/svn/another-project" svn-tui
+SVN_TUI_REPOS="/home/user/dev/:/home/user/dev/another-project" svn-tui
 ```
 
 ## Keyboard shortcuts
