@@ -509,10 +509,10 @@ Config file:
 
 Example:
 
-  path=/home/hussar/dev/svn/ehaz
-  username=h.bence
+  path=/home/user/dev/
+  username=user
   password=YOUR_PASSWORD_HERE
-  branch_username=hussar
+  branch_username=user
 
 Important:
 
@@ -1781,7 +1781,6 @@ func (m model) viewFileHistorySearch() string {
 	b.WriteString(mutedStyle.Render("Search by local working-copy file path. This does not list the whole repository.") + "\n\n")
 	b.WriteString(textStyle.Render("File path search:") + "\n")
 	b.WriteString(m.input.View() + "\n\n")
-	b.WriteString(mutedStyle.Render("Examples: action.php | ehaz.config | inc/config | payment/raiffeisen") + "\n")
 	b.WriteString(mutedStyle.Render("Enter: search | Esc: back"))
 
 	return b.String()
