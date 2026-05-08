@@ -222,7 +222,7 @@ username=user
 password=YOUR_PASSWORD_HERE
 branch_username=user
 
-path=/home/user/dev/svn/another-project
+path=/home/user/dev/another-project
 username=user
 password=YOUR_PASSWORD_HERE
 branch_username=user
@@ -325,7 +325,3 @@ SVN_TUI_REPOS="/home/user/dev/:/home/user/dev/another-project" svn-tui
 - Full revision tree loading can be slow on large repositories because it asks SVN for the complete XML log with changed paths.
 - Passwords in the config file are convenient but sensitive. Keep the config file private with `chmod 600`.
 - This tool shells out to the local `svn` command, so your normal SVN auth/cache behavior still matters.
-
-## License
-
-Add your license here.
