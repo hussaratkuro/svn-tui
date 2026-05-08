@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/xml"
 	"fmt"
 	"net/url"
 	"os"
@@ -26,6 +27,7 @@ const (
 	screenCreateBranchInput
 	screenCheckoutRevisionInput
 	screenBranchSelect
+	screenPullSelect
 	screenCommitSelect
 	screenCommitMessageInput
 	screenPartialHunkSelect
@@ -53,6 +55,7 @@ const (
 	actionResolveConflicts
 	actionCommitHistory
 	actionFileHistory
+	actionRevisionTree
 	actionQuit
 )
 
@@ -102,6 +105,11 @@ type branchesLoadedMsg struct {
 	Err      error
 }
 
+type pullItemsLoadedMsg struct {
+	Items []commitItem
+	Err   error
+}
+
 type commitItemsLoadedMsg struct {
 	Items []commitItem
 	Err   error
@@ -115,6 +123,7 @@ type conflictItemsLoadedMsg struct {
 type historyLoadedMsg struct {
 	Output string
 	Err    error
+	Title  string
 }
 
 type fileHistoryMatchesLoadedMsg struct {
@@ -170,9 +179,10 @@ type model struct {
 	actionOffset   int
 	selectedAction action
 
-	branches     []branch
-	branchCursor int
-	branchOffset int
+	branches          []branch
+	branchCursor      int
+	branchOffset      int
+	branchNumberInput string
 
 	fileHistoryQuery  string
 	fileHistoryItems  []string
@@ -197,6 +207,7 @@ type model struct {
 
 	viewport viewport.Model
 
+	historyTitle string
 	runningTitle string
 	result       string
 	err          error
@@ -309,6 +320,7 @@ func main() {
 			"Resolve conflicts",
 			"Commit history",
 			"File history",
+			"Revision tree",
 			"Quit",
 		},
 		input:    input,
@@ -540,7 +552,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.branches = msg.Branches
 		m.branchCursor = 0
 		m.branchOffset = 0
+		m.branchNumberInput = ""
 		m.screen = screenBranchSelect
+		return m, nil
+
+	case pullItemsLoadedMsg:
+		if msg.Err != nil {
+			m.screen = screenResult
+			m.err = msg.Err
+			m.result = "Failed to load incoming pull changes."
+			m.viewport.SetContent(m.result + "\n\n" + msg.Err.Error())
+			return m, nil
+		}
+
+		if len(msg.Items) == 0 {
+			m.screen = screenResult
+			m.err = nil
+			m.result = "No incoming changes found. Working copy is already up to date."
+			m.viewport.SetContent(m.result)
+			return m, nil
+		}
+
+		m.commitItems = msg.Items
+		m.commitCursor = 0
+		m.commitOffset = 0
+		m.screen = screenPullSelect
 		return m, nil
 
 	case commitItemsLoadedMsg:
@@ -615,9 +651,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case historyLoadedMsg:
 		m.screen = screenHistory
 		m.err = msg.Err
+		m.historyTitle = msg.Title
+		if strings.TrimSpace(m.historyTitle) == "" {
+			m.historyTitle = "Commit history"
+		}
 
 		if msg.Err != nil {
-			m.viewport.SetContent("Failed to load commit history.\n\n" + msg.Output + "\n\n" + msg.Err.Error())
+			m.viewport.SetContent("Failed to load " + strings.ToLower(m.historyTitle) + ".\n\n" + msg.Output + "\n\n" + msg.Err.Error())
 		} else {
 			m.viewport.SetContent(msg.Output)
 		}
@@ -740,6 +780,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 
+	case "a":
+		if m.screen == screenHistory && m.selectedAction == actionRevisionTree {
+			m.screen = screenRunning
+			m.runningTitle = "Building full ASCII revision tree..."
+			return m, loadRevisionTreeCmd(m.activeRepo, true)
+		}
+
 	case "q":
 		if m.screen == screenRepoSelect ||
 			m.screen == screenActionSelect ||
@@ -760,7 +807,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = screenRepoSelect
 
 		case screenDiff:
-			if m.selectedAction == actionRevertFiles {
+			if m.selectedAction == actionPull {
+				m.screen = screenPullSelect
+			} else if m.selectedAction == actionRevertFiles {
 				m.screen = screenRevertSelect
 			} else {
 				m.screen = screenCommitSelect
@@ -771,6 +820,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			screenFileHistorySearch,
 			screenFileHistorySelect,
 			screenBranchSelect,
+			screenPullSelect,
 			screenCommitSelect,
 			screenCommitMessageInput,
 			screenPartialHunkSelect,
@@ -805,6 +855,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case screenBranchSelect:
 		return m.updateBranchSelect(msg)
+
+	case screenPullSelect:
+		return m.updatePullSelect(msg)
 
 	case screenCommitSelect:
 		return m.updateCommitSelect(msg)
@@ -911,8 +964,8 @@ func (m model) updateActionSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch m.selectedAction {
 		case actionPull:
 			m.screen = screenRunning
-			m.runningTitle = "Pulling latest changes..."
-			return m, pullCmd(m.activeRepo)
+			m.runningTitle = "Loading incoming pull changes..."
+			return m, loadPullItemsCmd(m.activeRepo)
 
 		case actionStatus:
 			m.screen = screenRunning
@@ -966,6 +1019,11 @@ func (m model) updateActionSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.input.Placeholder = "Search file path, e.g. action.php or inc/config"
 			m.input.Focus()
 			m.screen = screenFileHistorySearch
+
+		case actionRevisionTree:
+			m.screen = screenRunning
+			m.runningTitle = "Building ASCII revision tree..."
+			return m, loadRevisionTreeCmd(m.activeRepo, false)
 
 		case actionQuit:
 			return m, tea.Quit
@@ -1104,36 +1162,147 @@ func (m model) updateBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "up", "k":
+		m.branchNumberInput = ""
 		if m.branchCursor > 0 {
 			m.branchCursor--
 		}
 
 	case "down", "j":
+		m.branchNumberInput = ""
 		if m.branchCursor < len(m.branches)-1 {
 			m.branchCursor++
 		}
 
 	case "pgup":
+		m.branchNumberInput = ""
 		m.branchCursor = max(0, m.branchCursor-visible)
 
 	case "pgdown":
+		m.branchNumberInput = ""
 		m.branchCursor = min(len(m.branches)-1, m.branchCursor+visible)
 
 	case "home":
+		m.branchNumberInput = ""
 		m.branchCursor = 0
 
 	case "end":
+		m.branchNumberInput = ""
 		m.branchCursor = len(m.branches) - 1
 
+	case "backspace", "ctrl+h":
+		if len(m.branchNumberInput) > 0 {
+			m.branchNumberInput = m.branchNumberInput[:len(m.branchNumberInput)-1]
+		}
+
 	case "enter":
-		selected := m.branches[m.branchCursor]
+		selectedIndex := m.branchCursor
+		if strings.TrimSpace(m.branchNumberInput) != "" {
+			var number int
+			if _, err := fmt.Sscanf(m.branchNumberInput, "%d", &number); err != nil || number < 1 || number > len(m.branches) {
+				m.screen = screenResult
+				m.err = fmt.Errorf("invalid branch number: %s", m.branchNumberInput)
+				m.result = fmt.Sprintf("Branch number must be between 1 and %d.", len(m.branches))
+				m.viewport.SetContent(m.result + "\n\n" + m.err.Error())
+				m.branchNumberInput = ""
+				return m, nil
+			}
+			selectedIndex = number - 1
+		}
+
+		selected := m.branches[selectedIndex]
 
 		m.screen = screenRunning
 		m.runningTitle = "Switching to branch..."
+		m.branchNumberInput = ""
 		return m, switchBranchCmd(m.activeRepo, selected.Name)
+
+	default:
+		key := msg.String()
+		if len(key) == 1 && key[0] >= '0' && key[0] <= '9' {
+			m.branchNumberInput += key
+			if len(m.branchNumberInput) > 6 {
+				m.branchNumberInput = m.branchNumberInput[len(m.branchNumberInput)-6:]
+			}
+
+			var number int
+			if _, err := fmt.Sscanf(m.branchNumberInput, "%d", &number); err == nil && number >= 1 && number <= len(m.branches) {
+				m.branchCursor = number - 1
+			}
+		}
 	}
 
 	m.branchOffset = adjustOffset(m.branchOffset, m.branchCursor, visible)
+
+	return m, nil
+}
+
+func (m model) updatePullSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visible := m.visibleListCount(10)
+
+	switch msg.String() {
+	case "up", "k":
+		if m.commitCursor > 0 {
+			m.commitCursor--
+		}
+
+	case "down", "j":
+		if m.commitCursor < len(m.commitItems)-1 {
+			m.commitCursor++
+		}
+
+	case "pgup":
+		m.commitCursor = max(0, m.commitCursor-visible)
+
+	case "pgdown":
+		m.commitCursor = min(len(m.commitItems)-1, m.commitCursor+visible)
+
+	case "home":
+		m.commitCursor = 0
+
+	case "end":
+		m.commitCursor = len(m.commitItems) - 1
+
+	case " ":
+		if len(m.commitItems) > 0 {
+			m.commitItems[m.commitCursor].Selected = !m.commitItems[m.commitCursor].Selected
+		}
+
+	case "a":
+		for i := range m.commitItems {
+			m.commitItems[i].Selected = true
+		}
+
+	case "n":
+		for i := range m.commitItems {
+			m.commitItems[i].Selected = false
+		}
+
+	case "d":
+		if len(m.commitItems) == 0 {
+			return m, nil
+		}
+
+		item := m.commitItems[m.commitCursor]
+		m.screen = screenRunning
+		m.runningTitle = "Loading incoming diff..."
+		return m, remoteDiffCmd(m.activeRepo, item, m.width)
+
+	case "enter":
+		paths := selectedCommitPaths(m.commitItems)
+		if len(paths) == 0 {
+			m.screen = screenResult
+			m.err = fmt.Errorf("no files selected")
+			m.result = "Select at least one incoming file with Space before pulling. Use 'a' to select all."
+			m.viewport.SetContent(m.result + "\n\n" + m.err.Error())
+			return m, nil
+		}
+
+		m.screen = screenRunning
+		m.runningTitle = "Pulling selected files..."
+		return m, pullCmd(m.activeRepo, paths)
+	}
+
+	m.commitOffset = adjustOffset(m.commitOffset, m.commitCursor, visible)
 
 	return m, nil
 }
@@ -1470,6 +1639,9 @@ func (m model) View() string {
 	case screenBranchSelect:
 		return m.viewBranchSelect()
 
+	case screenPullSelect:
+		return m.viewPullSelect()
+
 	case screenCommitSelect:
 		return m.viewCommitSelect()
 
@@ -1653,6 +1825,9 @@ func (m model) viewBranchSelect() string {
 
 	b.WriteString(repoInfoHeader("Switch to branch", m.activeRepo))
 	b.WriteString(textStyle.Render("Available SVN branches:") + "\n")
+	if strings.TrimSpace(m.branchNumberInput) != "" {
+		b.WriteString(labelYellowStyle.Render("Branch number: ") + valueWhiteStyle.Render(m.branchNumberInput) + mutedStyle.Render("  Enter: switch to this number | Backspace: edit") + "\n")
+	}
 	b.WriteString(mutedStyle.Render("-----------------------") + "\n")
 
 	visible := m.visibleListCount(10)
@@ -1675,7 +1850,53 @@ func (m model) viewBranchSelect() string {
 
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render(scrollHint(m.branchOffset, end, len(m.branches))) + "\n")
-	b.WriteString(mutedStyle.Render("↑/↓ or j/k: move | PgUp/PgDn: scroll | Enter: switch | Esc: back"))
+	b.WriteString(mutedStyle.Render("↑/↓ or j/k: move | type number + Enter: switch | PgUp/PgDn: scroll | Esc: back"))
+
+	return b.String()
+}
+
+func (m model) viewPullSelect() string {
+	var b strings.Builder
+
+	selectedCount := len(selectedCommitPaths(m.commitItems))
+
+	b.WriteString(repoInfoHeader("Pull incoming changes", m.activeRepo))
+	b.WriteString(mutedStyle.Render(fmt.Sprintf("Selected files: %d of %d", selectedCount, len(m.commitItems))) + "\n\n")
+	b.WriteString(textStyle.Render("Incoming repository changes:") + "\n")
+	b.WriteString(mutedStyle.Render("----------------------------") + "\n")
+
+	visible := m.visibleListCount(12)
+	end := min(len(m.commitItems), m.commitOffset+visible)
+
+	for i := m.commitOffset; i < end; i++ {
+		item := m.commitItems[i]
+
+		cursor := " "
+		lineStyle := normalStyle
+
+		if i == m.commitCursor {
+			cursor = ">"
+			lineStyle = selectedStyle
+		}
+
+		check := checkboxStyle.Render("[ ]")
+		if item.Selected {
+			check = checkedStyle.Render("[x]")
+		}
+
+		status := colorizePullStatus(item.Status)
+		line := fmt.Sprintf("%s %s ", cursor, check) + status + " " + valueWhiteStyle.Render(item.Path)
+
+		if item.Selected && i != m.commitCursor {
+			b.WriteString(checkedStyle.Render(fmt.Sprintf("%s %s ", cursor, "[x]")) + status + " " + valueWhiteStyle.Render(item.Path) + "\n")
+		} else {
+			b.WriteString(lineStyle.Render(line) + "\n")
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render(scrollHint(m.commitOffset, end, len(m.commitItems))) + "\n")
+	b.WriteString(mutedStyle.Render("Space: select | a: all | n: none | d: diff | Enter: pull selected | Esc: back"))
 
 	return b.String()
 }
@@ -2007,8 +2228,17 @@ func (m model) viewConflictSelect() string {
 func (m model) viewHistory() string {
 	var b strings.Builder
 
-	b.WriteString(repoInfoHeader("Commit history", m.activeRepo))
-	b.WriteString(mutedStyle.Render("↑/↓: scroll | PgUp/PgDn: page | Home/End: jump | Esc: back | q: quit") + "\n\n")
+	title := strings.TrimSpace(m.historyTitle)
+	if title == "" {
+		title = "Commit history"
+	}
+
+	b.WriteString(repoInfoHeader(title, m.activeRepo))
+	if m.selectedAction == actionRevisionTree {
+		b.WriteString(mutedStyle.Render("↑/↓: scroll | PgUp/PgDn: page | Home/End: jump | a: load full history | Esc: back | q: quit") + "\n\n")
+	} else {
+		b.WriteString(mutedStyle.Render("↑/↓: scroll | PgUp/PgDn: page | Home/End: jump | Esc: back | q: quit") + "\n\n")
+	}
 	b.WriteString(textStyle.Render(m.viewport.View()))
 
 	return b.String()
@@ -2111,6 +2341,116 @@ func loadBranches(r repo) ([]branch, error) {
 	})
 
 	return branches, nil
+}
+
+func loadPullItemsCmd(r repo) tea.Cmd {
+	return func() tea.Msg {
+		items, err := loadPullItems(r)
+		return pullItemsLoadedMsg{
+			Items: items,
+			Err:   err,
+		}
+	}
+}
+
+func loadPullItems(r repo) ([]commitItem, error) {
+	out, err := svn(r, "diff", "--summarize", "-r", "BASE:HEAD")
+	if err != nil {
+		return nil, fmt.Errorf(
+			"svn incoming diff summary failed\n\nWorking copy: %s\n\nOutput:\n%s\n\nError: %w",
+			r.Path,
+			out,
+			err,
+		)
+	}
+
+	var items []commitItem
+	for _, line := range strings.Split(out, "\n") {
+		item, ok := parseSVNDiffSummaryLine(line)
+		if ok {
+			item.Selected = false
+			items = append(items, item)
+		}
+	}
+
+	if len(items) == 0 {
+		statusOut, statusErr := svn(r, "status", "-u")
+		if statusErr == nil {
+			for _, line := range strings.Split(statusOut, "\n") {
+				item, ok := parseSVNStatusUpdateLine(line)
+				if ok {
+					item.Selected = false
+					items = append(items, item)
+				}
+			}
+		}
+	}
+
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].Status == items[j].Status {
+			return items[i].Path < items[j].Path
+		}
+		return items[i].Status < items[j].Status
+	})
+
+	return items, nil
+}
+
+func parseSVNDiffSummaryLine(line string) (commitItem, bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return commitItem{}, false
+	}
+
+	fields := strings.Fields(trimmed)
+	if len(fields) < 2 {
+		return commitItem{}, false
+	}
+
+	status := strings.TrimSpace(fields[0])
+	path := strings.Join(fields[1:], " ")
+	path = strings.TrimPrefix(filepath.ToSlash(path), "./")
+	if path == "" {
+		return commitItem{}, false
+	}
+
+	return commitItem{Status: status, Path: path}, true
+}
+
+func parseSVNStatusUpdateLine(line string) (commitItem, bool) {
+	if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "Status against revision") {
+		return commitItem{}, false
+	}
+
+	prefixLen := min(len(line), 9)
+	if !strings.Contains(line[:prefixLen], "*") {
+		return commitItem{}, false
+	}
+
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return commitItem{}, false
+	}
+
+	path := fields[len(fields)-1]
+	path = strings.TrimPrefix(filepath.ToSlash(path), "./")
+	status := "U"
+	if len(strings.TrimSpace(line)) > 0 {
+		first := strings.TrimSpace(line)[0]
+		if first == 'A' || first == 'D' || first == 'M' || first == 'R' {
+			status = string(first)
+		}
+	}
+
+	return commitItem{Status: status, Path: path}, true
+}
+
+func colorizePullStatus(status string) string {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		status = "U"
+	}
+	return statusStyleForSVNPathAction(status).Render(fmt.Sprintf("%-8s", status))
 }
 
 func loadCommitItemsCmd(r repo) tea.Cmd {
@@ -2409,7 +2749,7 @@ func switchTrunkCmd(r repo) tea.Cmd {
 	}
 }
 
-func pullCmd(r repo) tea.Cmd {
+func pullCmd(r repo, paths []string) tea.Cmd {
 	return func() tea.Msg {
 		var output strings.Builder
 
@@ -2430,10 +2770,17 @@ func pullCmd(r repo) tea.Cmd {
 			output.WriteString("Auth password: NOT SET\n")
 		}
 
-		output.WriteString("Running: svn update\n\n")
+		args := []string{"update"}
+		args = append(args, paths...)
 
-		out, err := svn(r, "update")
-		output.WriteString(out)
+		output.WriteString("Selected files:\n")
+		for _, path := range paths {
+			output.WriteString("  " + path + "\n")
+		}
+		output.WriteString("\nRunning: svn " + strings.Join(args, " ") + "\n\n")
+
+		out, err := svn(r, args...)
+		output.WriteString(colorizeSVNUpdateOutput(out))
 
 		if err == nil {
 			output.WriteString("\nPull finished successfully.")
@@ -2593,6 +2940,37 @@ func diffCmd(r repo, item commitItem, width int) tea.Cmd {
 				),
 				Path: item.Path,
 			}
+		}
+
+		return diffLoadedMsg{
+			Output: out,
+			Err:    nil,
+			Path:   item.Path,
+		}
+	}
+}
+
+func remoteDiffCmd(r repo, item commitItem, width int) tea.Cmd {
+	return func() tea.Msg {
+		out, err := svn(r, "diff", "-r", "BASE:HEAD", "--", item.Path)
+		if err != nil {
+			return diffLoadedMsg{
+				Output: out,
+				Err: fmt.Errorf(
+					"incoming diff failed\n\nWorking copy: %s\nPath: %s\n\nOutput:\n%s\n\nError: %w",
+					r.Path,
+					item.Path,
+					out,
+					err,
+				),
+				Path: item.Path,
+			}
+		}
+
+		if strings.TrimSpace(out) == "" {
+			out = "No incoming diff found for:\n" + item.Path
+		} else {
+			out = "Incoming diff: BASE -> HEAD\nPath: " + item.Path + "\nStatus: " + item.Status + "\n\n" + colorizeUnifiedDiff(out)
 		}
 
 		return diffLoadedMsg{
@@ -2836,6 +3214,7 @@ func loadFileHistoryCmd(r repo, path string) tea.Cmd {
 		if err != nil {
 			return historyLoadedMsg{
 				Output: out,
+				Title:  "File history",
 				Err: fmt.Errorf(
 					"svn file log failed\n\nWorking copy: %s\nFile: %s\n\nOutput:\n%s\n\nError: %w",
 					r.Path,
@@ -2855,6 +3234,7 @@ func loadFileHistoryCmd(r repo, path string) tea.Cmd {
 		return historyLoadedMsg{
 			Output: out,
 			Err:    nil,
+			Title:  "File history",
 		}
 	}
 }
@@ -2862,6 +3242,8 @@ func loadFileHistoryCmd(r repo, path string) tea.Cmd {
 func colorizeSVNLog(out string) string {
 	lines := strings.Split(out, "\n")
 	var b strings.Builder
+	inEntry := false
+	inChangedPaths := false
 	inMessage := false
 
 	for _, line := range lines {
@@ -2869,12 +3251,40 @@ func colorizeSVNLog(out string) string {
 
 		if isSVNLogSeparator(trimmed) {
 			b.WriteString(labelMauveStyle.Render(line) + "\n")
+			inEntry = false
+			inChangedPaths = false
 			inMessage = false
 			continue
 		}
 
 		if strings.HasPrefix(line, "r") && strings.Contains(line, " | ") {
 			b.WriteString(colorizeSVNLogMetaLine(line) + "\n")
+			inEntry = true
+			inChangedPaths = false
+			inMessage = false
+			continue
+		}
+
+		if inEntry && trimmed == "Changed paths:" {
+			b.WriteString(mutedStyle.Render(line) + "\n")
+			inChangedPaths = true
+			inMessage = false
+			continue
+		}
+
+		if inChangedPaths {
+			if trimmed == "" {
+				b.WriteString(line + "\n")
+				inChangedPaths = false
+				inMessage = true
+				continue
+			}
+			b.WriteString(colorizeSVNChangedPathLine(line) + "\n")
+			continue
+		}
+
+		if inEntry && trimmed == "" {
+			b.WriteString(line + "\n")
 			inMessage = true
 			continue
 		}
@@ -2888,6 +3298,23 @@ func colorizeSVNLog(out string) string {
 	}
 
 	return strings.TrimRight(b.String(), "\n")
+}
+
+func colorizeSVNChangedPathLine(line string) string {
+	trimmedLeft := strings.TrimLeft(line, " \t")
+	prefix := line[:len(line)-len(trimmedLeft)]
+	if trimmedLeft == "" {
+		return line
+	}
+
+	fields := strings.Fields(trimmedLeft)
+	if len(fields) < 2 {
+		return mutedStyle.Render(line)
+	}
+
+	action := fields[0]
+	rest := strings.TrimSpace(strings.TrimPrefix(trimmedLeft, action))
+	return prefix + statusStyleForSVNPathAction(action).Render(action) + " " + valueWhiteStyle.Render(rest)
 }
 
 func isSVNLogSeparator(line string) bool {
@@ -2927,11 +3354,69 @@ func colorizeSVNLogMetaLine(line string) string {
 	return b.String()
 }
 
+func colorizeSVNUpdateOutput(out string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(out, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			b.WriteString("\n")
+			continue
+		}
+
+		if len(trimmed) >= 2 {
+			status := strings.TrimSpace(trimmed[:1])
+			path := strings.TrimSpace(trimmed[1:])
+			if status == "A" || status == "D" || status == "U" || status == "G" || status == "C" || status == "E" {
+				b.WriteString(statusStyleForSVNUpdateAction(status).Render(status) + " " + valueWhiteStyle.Render(path) + "\n")
+				continue
+			}
+		}
+
+		b.WriteString(mutedStyle.Render(line) + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func statusStyleForSVNUpdateAction(action string) lipgloss.Style {
+	switch strings.ToUpper(strings.TrimSpace(action)) {
+	case "A", "U", "G":
+		return successStyle
+	case "D":
+		return errorStyle
+	case "C":
+		return diffModifiedStyle
+	case "E":
+		return warningStyle
+	default:
+		return textStyle
+	}
+}
+
+func colorizeUnifiedDiff(out string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
+			b.WriteString(labelMauveStyle.Render(line) + "\n")
+		case strings.HasPrefix(line, "@@"):
+			b.WriteString(diffModifiedStyle.Render(line) + "\n")
+		case strings.HasPrefix(line, "+"):
+			b.WriteString(diffAddedStyle.Render(line) + "\n")
+		case strings.HasPrefix(line, "-"):
+			b.WriteString(diffDeletedStyle.Render(line) + "\n")
+		default:
+			b.WriteString(diffSameStyle.Render(line) + "\n")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 func loadHistoryCmd(r repo) tea.Cmd {
 	return func() tea.Msg {
 		out, err := svn(
 			r,
 			"log",
+			"-v",
 			"-l",
 			"80",
 		)
@@ -2939,6 +3424,7 @@ func loadHistoryCmd(r repo) tea.Cmd {
 		if err != nil {
 			return historyLoadedMsg{
 				Output: out,
+				Title:  "Commit history",
 				Err: fmt.Errorf(
 					"svn log failed\n\nWorking copy: %s\n\nOutput:\n%s\n\nError: %w",
 					r.Path,
@@ -2957,8 +3443,703 @@ func loadHistoryCmd(r repo) tea.Cmd {
 		return historyLoadedMsg{
 			Output: out,
 			Err:    nil,
+			Title:  "Commit history",
 		}
 	}
+}
+
+type svnLogXML struct {
+	Entries []svnLogEntryXML `xml:"logentry"`
+}
+
+type svnLogEntryXML struct {
+	Revision int             `xml:"revision,attr"`
+	Author   string          `xml:"author"`
+	Date     string          `xml:"date"`
+	Msg      string          `xml:"msg"`
+	Paths    []svnLogPathXML `xml:"paths>path"`
+}
+
+type svnLogPathXML struct {
+	Action       string `xml:"action,attr"`
+	CopyFromRev  int    `xml:"copyfrom-rev,attr"`
+	CopyFromPath string `xml:"copyfrom-path,attr"`
+	Path         string `xml:",chardata"`
+}
+
+func loadRevisionTreeCmd(r repo, full bool) tea.Cmd {
+	return func() tea.Msg {
+		target := strings.TrimSpace(r.Root)
+		if target == "" {
+			target = "."
+		}
+
+		args := []string{"log", "--xml", "-v"}
+		if !full {
+			args = append(args, "--limit", "250")
+		}
+		args = append(args, target)
+
+		out, err := svn(r, args...)
+		if err != nil {
+			return historyLoadedMsg{
+				Output: out,
+				Title:  revisionTreeTitle(full),
+				Err: fmt.Errorf(
+					"svn revision tree log failed\n\nWorking copy: %s\nRepository root: %s\nMode: %s\n\nOutput:\n%s\n\nError: %w",
+					r.Path,
+					target,
+					revisionTreeModeText(full),
+					out,
+					err,
+				),
+			}
+		}
+
+		tree, err := buildASCIIRevisionTree(out, r, full)
+		if err != nil {
+			return historyLoadedMsg{
+				Output: out,
+				Title:  revisionTreeTitle(full),
+				Err:    err,
+			}
+		}
+
+		return historyLoadedMsg{
+			Output: tree,
+			Err:    nil,
+			Title:  revisionTreeTitle(full),
+		}
+	}
+}
+
+func revisionTreeTitle(full bool) string {
+	if full {
+		return "ASCII revision tree, full history"
+	}
+	return "ASCII revision tree, last 250 entries"
+}
+
+func revisionTreeModeText(full bool) string {
+	if full {
+		return "full history"
+	}
+	return "last 250 entries"
+}
+
+func buildASCIIRevisionTree(xmlOut string, r repo, full bool) (string, error) {
+	var parsed svnLogXML
+	if err := xml.Unmarshal([]byte(xmlOut), &parsed); err != nil {
+		return "", fmt.Errorf("failed to parse svn log XML: %w", err)
+	}
+
+	if len(parsed.Entries) == 0 {
+		return "No revision tree entries found.", nil
+	}
+
+	tree := buildRevisionBranchGraph(parsed.Entries)
+
+	var b strings.Builder
+	b.WriteString(labelMauveStyle.Render("Revision tree") + "\n")
+	b.WriteString(labelYellowStyle.Render("Repository root: ") + valueWhiteStyle.Render(firstNonEmpty(r.Root, r.URL, r.Path)) + "\n")
+	b.WriteString(labelYellowStyle.Render("Mode: ") + valueWhiteStyle.Render(revisionTreeModeText(full)) + "\n")
+	if !full {
+		b.WriteString(mutedStyle.Render("Showing newest 250 log entries. Press 'a' here to load full history.") + "\n")
+	}
+	b.WriteString(mutedStyle.Render("Branch/tag structure only. File-level changes are in Commit history.") + "\n")
+	b.WriteString("\n")
+
+	if len(tree.Nodes) == 0 {
+		b.WriteString("No trunk/branch/tag activity found in the loaded log entries.")
+		return strings.TrimRight(b.String(), "\n"), nil
+	}
+
+	roots := tree.Roots()
+	for i, root := range roots {
+		last := i == len(roots)-1
+		renderRevisionTreeNode(&b, tree, root, "", last)
+	}
+
+	return strings.TrimRight(b.String(), "\n"), nil
+}
+
+type revisionBranchGraph struct {
+	Nodes map[string]*revisionBranchNode
+}
+
+type revisionBranchNode struct {
+	Path           string
+	Name           string
+	Kind           string
+	CreatedRev     int
+	CreatedDate    string
+	CreatedFrom    string
+	CreatedFromRev int
+	DeletedRev     int
+	LastRev        int
+	CommitRevs     map[int]bool
+	Commits        []revisionBranchCommit
+	Children       []string
+	MergeBacks     []revisionMergeBack
+}
+
+type revisionBranchCommit struct {
+	Revision int
+	Author   string
+	Date     string
+	Msg      string
+}
+
+type revisionMergeBack struct {
+	Target string
+	Rev    int
+	Msg    string
+}
+
+func buildRevisionBranchGraph(entries []svnLogEntryXML) revisionBranchGraph {
+	graph := revisionBranchGraph{Nodes: map[string]*revisionBranchNode{}}
+	ensure := func(path string, kind string) *revisionBranchNode {
+		path = normalizeSVNTreePath(path)
+		if path == "" {
+			path = "/trunk"
+		}
+		if node, ok := graph.Nodes[path]; ok {
+			if node.Kind == "" && kind != "" {
+				node.Kind = kind
+			}
+			return node
+		}
+		node := &revisionBranchNode{
+			Path:       path,
+			Name:       revisionTreeDisplayName(path),
+			Kind:       kind,
+			CommitRevs: map[int]bool{},
+		}
+		graph.Nodes[path] = node
+		return node
+	}
+
+	ensure("/trunk", "trunk")
+
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].Revision < entries[j].Revision
+	})
+
+	for _, entry := range entries {
+		entryRoots := map[string]bool{}
+		for _, changedPath := range entry.Paths {
+			root, kind := revisionTreeRootPath(changedPath.Path)
+			if root == "" {
+				continue
+			}
+
+			node := ensure(root, kind)
+			entryRoots[root] = true
+
+			if entry.Revision > node.LastRev {
+				node.LastRev = entry.Revision
+			}
+
+			action := strings.ToUpper(strings.TrimSpace(changedPath.Action))
+			changedRootPath := normalizeSVNTreePath(changedPath.Path)
+			if action == "A" && changedRootPath == root {
+				if node.CreatedRev == 0 || entry.Revision < node.CreatedRev {
+					node.CreatedRev = entry.Revision
+					node.CreatedDate = formatSVNLogDate(entry.Date)
+				}
+				if strings.TrimSpace(changedPath.CopyFromPath) != "" {
+					copyRoot, _ := revisionTreeRootPath(changedPath.CopyFromPath)
+					if copyRoot == "" {
+						copyRoot = normalizeSVNTreePath(changedPath.CopyFromPath)
+					}
+					node.CreatedFrom = copyRoot
+					node.CreatedFromRev = changedPath.CopyFromRev
+					ensure(copyRoot, svnTreePathKind(copyRoot))
+				}
+			}
+
+			if action == "D" && changedRootPath == root {
+				node.DeletedRev = entry.Revision
+			}
+		}
+
+		for root := range entryRoots {
+			node := ensure(root, svnTreePathKind(root))
+			if !node.CommitRevs[entry.Revision] {
+				node.CommitRevs[entry.Revision] = true
+				node.Commits = append(node.Commits, revisionBranchCommit{
+					Revision: entry.Revision,
+					Author:   strings.TrimSpace(entry.Author),
+					Date:     formatSVNLogDate(entry.Date),
+					Msg:      compactOneLine(entry.Msg),
+				})
+			}
+		}
+
+		detectRevisionMergeBacks(graph, entry, entryRoots)
+	}
+
+	for path, node := range graph.Nodes {
+		parent := strings.TrimSpace(node.CreatedFrom)
+		if path == "/trunk" {
+			continue
+		}
+		if parent == "" || parent == path {
+			parent = "/trunk"
+		}
+		parentNode := ensure(parent, svnTreePathKind(parent))
+		if !containsString(parentNode.Children, path) {
+			parentNode.Children = append(parentNode.Children, path)
+		}
+	}
+
+	for _, node := range graph.Nodes {
+		sort.SliceStable(node.Children, func(i, j int) bool {
+			left := graph.Nodes[node.Children[i]]
+			right := graph.Nodes[node.Children[j]]
+			if left == nil || right == nil {
+				return node.Children[i] < node.Children[j]
+			}
+			if left.LastRev == right.LastRev {
+				return left.Path < right.Path
+			}
+			return left.LastRev > right.LastRev
+		})
+		sort.SliceStable(node.MergeBacks, func(i, j int) bool {
+			return node.MergeBacks[i].Rev > node.MergeBacks[j].Rev
+		})
+		sort.SliceStable(node.Commits, func(i, j int) bool {
+			if node.Commits[i].Revision == node.Commits[j].Revision {
+				return node.Commits[i].Msg < node.Commits[j].Msg
+			}
+			return node.Commits[i].Revision > node.Commits[j].Revision
+		})
+	}
+
+	return graph
+}
+
+func detectRevisionMergeBacks(graph revisionBranchGraph, entry svnLogEntryXML, entryRoots map[string]bool) {
+	msg := strings.ToLower(compactOneLine(entry.Msg))
+	if msg == "" {
+		return
+	}
+
+	mergeWords := []string{"merge", "merged", "mergel", "visszamerge", "vissza merge", "vissza lett mergelve"}
+	hasMergeWord := false
+	for _, word := range mergeWords {
+		if strings.Contains(msg, word) {
+			hasMergeWord = true
+			break
+		}
+	}
+	if !hasMergeWord {
+		return
+	}
+
+	for sourcePath, sourceNode := range graph.Nodes {
+		if sourcePath == "/trunk" || sourceNode == nil {
+			continue
+		}
+		branchName := strings.ToLower(pathBaseName(sourcePath))
+		if branchName == "" || !strings.Contains(msg, branchName) {
+			continue
+		}
+		for target := range entryRoots {
+			if target == sourcePath {
+				continue
+			}
+			sourceNode.MergeBacks = append(sourceNode.MergeBacks, revisionMergeBack{
+				Target: target,
+				Rev:    entry.Revision,
+				Msg:    compactOneLine(entry.Msg),
+			})
+		}
+	}
+}
+
+func (g revisionBranchGraph) Roots() []string {
+	if _, ok := g.Nodes["/trunk"]; ok {
+		return []string{"/trunk"}
+	}
+
+	child := map[string]bool{}
+	for _, node := range g.Nodes {
+		for _, c := range node.Children {
+			child[c] = true
+		}
+	}
+
+	var roots []string
+	for path := range g.Nodes {
+		if !child[path] {
+			roots = append(roots, path)
+		}
+	}
+	sort.SliceStable(roots, func(i, j int) bool {
+		left := g.Nodes[roots[i]]
+		right := g.Nodes[roots[j]]
+		if left == nil || right == nil {
+			return roots[i] < roots[j]
+		}
+		if left.LastRev == right.LastRev {
+			return left.Path < right.Path
+		}
+		return left.LastRev > right.LastRev
+	})
+	return roots
+}
+
+type revisionTreeRenderItem struct {
+	Kind      string
+	Revision  int
+	SortLabel string
+	Commit    revisionBranchCommit
+	ChildPath string
+	Merge     revisionMergeBack
+}
+
+func renderRevisionTreeNode(b *strings.Builder, graph revisionBranchGraph, path string, prefix string, last bool) {
+	node := graph.Nodes[path]
+	if node == nil {
+		return
+	}
+
+	connector := "├─"
+	childPrefix := prefix + labelMauveStyle.Render("│  ")
+	plainChildPrefix := prefix + "│  "
+	if last {
+		connector = "└─"
+		childPrefix = prefix + "   "
+		plainChildPrefix = prefix + "   "
+	}
+
+	b.WriteString(prefix + labelMauveStyle.Render(connector) + " " + renderRevisionTreeNodeLabel(node) + "\n")
+
+	items := revisionTreeRenderItems(graph, node)
+	for i, item := range items {
+		isLast := i == len(items)-1
+		switch item.Kind {
+		case "commit":
+			renderRevisionTreeCommit(b, item.Commit, plainChildPrefix, isLast)
+		case "child":
+			renderRevisionTreeNode(b, graph, item.ChildPath, childPrefix, isLast)
+		case "merge":
+			renderRevisionTreeMergeBack(b, item.Merge, plainChildPrefix, isLast)
+		}
+	}
+}
+
+func revisionTreeRenderItems(graph revisionBranchGraph, node *revisionBranchNode) []revisionTreeRenderItem {
+	items := make([]revisionTreeRenderItem, 0, len(node.Commits)+len(node.Children)+len(node.MergeBacks))
+
+	for _, commit := range node.Commits {
+		items = append(items, revisionTreeRenderItem{
+			Kind:      "commit",
+			Revision:  commit.Revision,
+			SortLabel: commit.Msg,
+			Commit:    commit,
+		})
+	}
+
+	for _, childPath := range node.Children {
+		child := graph.Nodes[childPath]
+		if child == nil {
+			continue
+		}
+		rev := child.LastRev
+		if rev == 0 {
+			rev = child.CreatedRev
+		}
+		items = append(items, revisionTreeRenderItem{
+			Kind:      "child",
+			Revision:  rev,
+			SortLabel: child.Path,
+			ChildPath: childPath,
+		})
+	}
+
+	for _, merge := range node.MergeBacks {
+		items = append(items, revisionTreeRenderItem{
+			Kind:      "merge",
+			Revision:  merge.Rev,
+			SortLabel: merge.Target,
+			Merge:     merge,
+		})
+	}
+
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].Revision == items[j].Revision {
+			if items[i].Kind == items[j].Kind {
+				return items[i].SortLabel < items[j].SortLabel
+			}
+			return revisionTreeItemPriority(items[i].Kind) < revisionTreeItemPriority(items[j].Kind)
+		}
+		return items[i].Revision > items[j].Revision
+	})
+
+	return items
+}
+
+func revisionTreeItemPriority(kind string) int {
+	switch kind {
+	case "merge":
+		return 0
+	case "child":
+		return 1
+	case "commit":
+		return 2
+	default:
+		return 9
+	}
+}
+
+func renderRevisionTreeMergeBack(b *strings.Builder, merge revisionMergeBack, prefix string, last bool) {
+	mergeConnector := "├⤴"
+	if last {
+		mergeConnector = "└⤴"
+	}
+	line := prefix + labelMauveStyle.Render(mergeConnector) + " " + diffModifiedStyle.Render("merged back") + " " + labelMauveStyle.Render("→") + " " + valueWhiteStyle.Render(merge.Target)
+	if merge.Rev > 0 {
+		line += " " + successStyle.Render(fmt.Sprintf("r%d", merge.Rev))
+	}
+	if strings.TrimSpace(merge.Msg) != "" {
+		line += " " + actionStyle.Render(compactOneLine(merge.Msg))
+	}
+	b.WriteString(line + "\n")
+}
+
+func renderRevisionTreeCommit(b *strings.Builder, commit revisionBranchCommit, prefix string, last bool) {
+	connector := "├•"
+	if last {
+		connector = "└•"
+	}
+
+	line := prefix + labelMauveStyle.Render(connector) + " " + successStyle.Render(fmt.Sprintf("r%d", commit.Revision))
+	if strings.TrimSpace(commit.Author) != "" {
+		line += " " + labelMauveStyle.Render("|") + " " + labelYellowStyle.Render(commit.Author)
+	}
+	if strings.TrimSpace(commit.Date) != "" {
+		line += " " + labelMauveStyle.Render("|") + " " + mutedStyle.Render(commit.Date)
+	}
+	if strings.TrimSpace(commit.Msg) != "" {
+		line += " " + labelMauveStyle.Render("|") + " " + actionStyle.Render(commit.Msg)
+	}
+	b.WriteString(line + "\n")
+}
+
+func renderRevisionTreeNodeLabel(node *revisionBranchNode) string {
+	label := valueWhiteStyle.Render(node.Path)
+	if node.CreatedRev > 0 {
+		created := fmt.Sprintf("created r%d", node.CreatedRev)
+		if strings.TrimSpace(node.CreatedDate) != "" {
+			created += " " + node.CreatedDate
+		}
+		label += " " + mutedStyle.Render(created)
+	}
+	if node.CreatedFrom != "" {
+		label += " " + labelMauveStyle.Render("from") + " " + valueWhiteStyle.Render(node.CreatedFrom)
+		if node.CreatedFromRev > 0 {
+			label += " " + mutedStyle.Render(fmt.Sprintf("@r%d", node.CreatedFromRev))
+		}
+	}
+	if node.LastRev > 0 {
+		label += " " + mutedStyle.Render(fmt.Sprintf("last r%d", node.LastRev))
+	}
+	if node.DeletedRev > 0 {
+		label += " " + errorStyle.Render(fmt.Sprintf("deleted r%d", node.DeletedRev))
+	}
+	return label
+}
+
+func revisionTreeDisplayName(path string) string {
+	base := pathBaseName(path)
+	if base == "" {
+		return path
+	}
+	return base
+}
+
+func pathBaseName(path string) string {
+	clean := strings.Trim(normalizeSVNTreePath(path), "/")
+	if clean == "" {
+		return ""
+	}
+	parts := strings.Split(clean, "/")
+	return parts[len(parts)-1]
+}
+
+func containsString(items []string, needle string) bool {
+	for _, item := range items {
+		if item == needle {
+			return true
+		}
+	}
+	return false
+}
+
+type revisionTreePathSummary struct {
+	Action       string
+	Path         string
+	Kind         string
+	CopyFromPath string
+	CopyFromRev  int
+}
+
+func summarizeRevisionTreePaths(paths []svnLogPathXML) []revisionTreePathSummary {
+	byKey := make(map[string]revisionTreePathSummary)
+
+	for _, path := range paths {
+		root, kind := revisionTreeRootPath(path.Path)
+		if root == "" {
+			continue
+		}
+
+		action := strings.TrimSpace(path.Action)
+		if action == "" {
+			action = "M"
+		}
+
+		summary := revisionTreePathSummary{
+			Action: action,
+			Path:   root,
+			Kind:   kind,
+		}
+
+		if strings.TrimSpace(path.CopyFromPath) != "" {
+			copyRoot, _ := revisionTreeRootPath(path.CopyFromPath)
+			if copyRoot == "" {
+				copyRoot = normalizeSVNTreePath(path.CopyFromPath)
+			}
+			summary.CopyFromPath = copyRoot
+			summary.CopyFromRev = path.CopyFromRev
+		}
+
+		key := summary.Action + "|" + summary.Path + "|" + summary.CopyFromPath + fmt.Sprintf("|%d", summary.CopyFromRev)
+		if existing, ok := byKey[key]; ok {
+			if existing.Kind == "" {
+				existing.Kind = summary.Kind
+			}
+			byKey[key] = existing
+			continue
+		}
+		byKey[key] = summary
+	}
+
+	items := make([]revisionTreePathSummary, 0, len(byKey))
+	for _, item := range byKey {
+		items = append(items, item)
+	}
+
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].Path == items[j].Path {
+			return items[i].Action < items[j].Action
+		}
+		return items[i].Path < items[j].Path
+	})
+
+	return items
+}
+
+func revisionTreeRootPath(path string) (string, string) {
+	clean := strings.Trim(normalizeSVNTreePath(path), "/")
+	if clean == "" {
+		return "", ""
+	}
+
+	parts := strings.Split(clean, "/")
+	switch parts[0] {
+	case "trunk":
+		return "/trunk", "trunk"
+	case "branches":
+		if len(parts) >= 2 && parts[1] != "" {
+			return "/branches/" + parts[1], "branch: " + parts[1]
+		}
+		return "/branches", "branches"
+	case "tags":
+		if len(parts) >= 2 && parts[1] != "" {
+			return "/tags/" + parts[1], "tag: " + parts[1]
+		}
+		return "/tags", "tags"
+	default:
+		return "", ""
+	}
+}
+
+func statusStyleForSVNPathAction(action string) lipgloss.Style {
+	switch strings.ToUpper(strings.TrimSpace(action)) {
+	case "A":
+		return successStyle
+	case "D":
+		return errorStyle
+	case "M":
+		return actionStyle
+	case "R":
+		return warningStyle
+	default:
+		return textStyle
+	}
+}
+
+func svnTreePathKind(path string) string {
+	clean := strings.Trim(path, "/")
+	if clean == "trunk" || strings.HasPrefix(clean, "trunk/") {
+		return "trunk"
+	}
+	if clean == "branches" || strings.HasPrefix(clean, "branches/") {
+		parts := strings.Split(clean, "/")
+		if len(parts) >= 2 && parts[1] != "" {
+			return "branch: " + parts[1]
+		}
+		return "branches"
+	}
+	if clean == "tags" || strings.HasPrefix(clean, "tags/") {
+		parts := strings.Split(clean, "/")
+		if len(parts) >= 2 && parts[1] != "" {
+			return "tag: " + parts[1]
+		}
+		return "tags"
+	}
+	return ""
+}
+
+func normalizeSVNTreePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	path = filepath.ToSlash(path)
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return path
+}
+
+func compactOneLine(s string) string {
+	fields := strings.Fields(strings.ReplaceAll(s, "\x00", " "))
+	return strings.Join(fields, " ")
+}
+
+func formatSVNLogDate(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t.Local().Format("2006-01-02 15:04")
+	}
+
+	return s
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return "-"
 }
 
 func loadPartialHunksCmd(r repo, item commitItem) tea.Cmd {
