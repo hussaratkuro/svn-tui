@@ -775,11 +775,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c":
-		return m, tea.Quit
+func isTextInputScreen(s screen) bool {
+	switch s {
+	case screenCreateBranchInput,
+		screenCheckoutRevisionInput,
+		screenCommitMessageInput,
+		screenFileHistorySearch:
+		return true
+	default:
+		return false
+	}
+}
 
+func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+
+	if key == "ctrl+c" {
+		return m, tea.Quit
+	}
+
+	// Text input screens must receive normal character keys before global shortcuts.
+	// Without this, typing letters such as "q" in a commit message triggers the
+	// global quit/back shortcut instead of inserting the character.
+	if isTextInputScreen(m.screen) && key != "esc" {
+		switch m.screen {
+		case screenCreateBranchInput:
+			return m.updateCreateBranchInput(msg)
+		case screenCheckoutRevisionInput:
+			return m.updateCheckoutRevisionInput(msg)
+		case screenFileHistorySearch:
+			return m.updateFileHistorySearch(msg)
+		case screenCommitMessageInput:
+			return m.updateCommitMessageInput(msg)
+		}
+	}
+
+	switch key {
 	case "a":
 		if m.screen == screenHistory && m.selectedAction == actionRevisionTree {
 			m.screen = screenRunning
@@ -3017,7 +3048,7 @@ func diffCmd(r repo, item commitItem, width int) tea.Cmd {
 		out, err := buildSideBySideDiff(r, item, width)
 
 		if err != nil {
-			fallbackOut, fallbackErr := svn(r, "diff", item.Path)
+			fallbackOut, fallbackErr := svn(r, "diff", "--", item.Path)
 			if fallbackOut != "" {
 				out += "\n\nUnified svn diff fallback:\n\n" + fallbackOut
 			}
@@ -4272,7 +4303,7 @@ func loadPartialHunks(r repo, item commitItem) ([]partialHunk, error) {
 		return nil, fmt.Errorf("partial commit is only supported for files")
 	}
 
-	out, err := svn(r, "diff", item.Path)
+	out, err := svn(r, "diff", "--", item.Path)
 	if err != nil {
 		return nil, fmt.Errorf("svn diff failed for partial commit\n\nOutput:\n%s\n\nError: %w", out, err)
 	}
@@ -4384,7 +4415,7 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 	rightWidth := max(24, width-separatorWidth-leftWidth)
 
 	if isLikelyDirectory(r, item.Path) {
-		out, err := svn(r, "diff", item.Path)
+		out, err := svn(r, "diff", "--", item.Path)
 		if err != nil {
 			return "", err
 		}
@@ -4399,8 +4430,11 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 	if item.Unversioned || strings.HasPrefix(item.Status, "?") || strings.HasPrefix(item.Status, "A") {
 		oldText = ""
 		newText, err = readWorkingFile(r, item.Path)
+		if err != nil && strings.HasPrefix(item.Status, "A") {
+			newText, err = readRepositoryFile(r, item.Path, "HEAD")
+		}
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("new file content could not be read from working copy or repository HEAD: %w", err)
 		}
 	} else if strings.HasPrefix(item.Status, "D") {
 		oldText, err = readBaseFile(r, item.Path)
@@ -4429,6 +4463,8 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 	b.WriteString("Status: " + item.Status + "\n")
 	if item.Unversioned {
 		b.WriteString("Note: unversioned file, left side is empty. It will be svn add-ed before commit if selected.\n")
+	} else if strings.HasPrefix(item.Status, "A") {
+		b.WriteString("Note: added file, left side is empty and right side shows the new file content.\n")
 	}
 	b.WriteString("\n")
 	b.WriteString(renderDiffHeader(leftWidth, rightWidth))
@@ -4656,6 +4692,38 @@ func readWorkingFile(r repo, path string) (string, error) {
 	}
 
 	return string(data), nil
+}
+
+func readRepositoryFile(r repo, path string, revision string) (string, error) {
+	if revision == "" {
+		revision = "HEAD"
+	}
+
+	out, err := svn(r, "cat", "-r", revision, "--", repositoryFileURL(r, path))
+	if err != nil {
+		return "", err
+	}
+
+	return out, nil
+}
+
+func repositoryFileURL(r repo, path string) string {
+	base := strings.TrimRight(r.URL, "/")
+	return base + "/" + escapeSVNURLPath(path)
+}
+
+func escapeSVNURLPath(path string) string {
+	path = strings.TrimPrefix(filepath.ToSlash(path), "/")
+	if path == "" {
+		return ""
+	}
+
+	parts := strings.Split(path, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+
+	return strings.Join(parts, "/")
 }
 
 func isLikelyDirectory(r repo, path string) bool {
