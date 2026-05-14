@@ -263,6 +263,9 @@ var (
 			Foreground(catYellow).
 			Bold(true)
 
+	checkboxListItemStyle = lipgloss.NewStyle().
+				Foreground(catYellow)
+
 	checkboxFocusedLineStyle = lipgloss.NewStyle().
 					Background(lipgloss.Color("#1e1e2e"))
 
@@ -841,9 +844,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = screenRepoSelect
 
 		case screenDiff:
-			if m.selectedAction == actionPull {
-				m.screen = screenPullSelect
-			} else if m.selectedAction == actionRevertFiles {
+			if m.selectedAction == actionRevertFiles {
 				m.screen = screenRevertSelect
 			} else {
 				m.screen = screenCommitSelect
@@ -998,8 +999,8 @@ func (m model) updateActionSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch m.selectedAction {
 		case actionPull:
 			m.screen = screenRunning
-			m.runningTitle = "Loading incoming pull changes..."
-			return m, loadPullItemsCmd(m.activeRepo)
+			m.runningTitle = "Pulling all changes..."
+			return m, pullCmd(m.activeRepo, nil)
 
 		case actionStatus:
 			m.screen = screenRunning
@@ -1030,7 +1031,7 @@ func (m model) updateActionSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		case actionSwitchTrunk:
 			m.screen = screenRunning
-			m.runningTitle = "Switching to trunk..."
+			m.runningTitle = "Switching to trunk and updating..."
 			return m, switchTrunkCmd(m.activeRepo)
 
 		case actionCommit:
@@ -1246,7 +1247,7 @@ func (m model) updateBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		selected := m.branches[selectedIndex]
 
 		m.screen = screenRunning
-		m.runningTitle = "Switching to branch..."
+		m.runningTitle = "Switching to branch and updating..."
 		m.branchNumberInput = ""
 		return m, switchBranchCmd(m.activeRepo, selected.Name)
 
@@ -1905,28 +1906,16 @@ func (m model) viewPullSelect() string {
 		item := m.commitItems[i]
 
 		cursor := " "
-		lineStyle := normalStyle
-
 		if i == m.commitCursor {
 			cursor = ">"
-			lineStyle = selectedStyle
 		}
 
-		check := checkboxStyle.Render("[ ]")
+		check := "[ ]"
 		if item.Selected {
-			check = checkedStyle.Render("[x]")
+			check = "[x]"
 		}
 
-		status := colorizePullStatus(item.Status)
-		line := fmt.Sprintf("%s %s ", cursor, check) + status + " " + valueWhiteStyle.Render(item.Path)
-
-		if i == m.commitCursor {
-			b.WriteString(m.renderCheckboxListLine(line, true, item.Selected) + "\n")
-		} else if item.Selected {
-			b.WriteString(checkedStyle.Render(fmt.Sprintf("%s %s ", cursor, "[x]")) + status + " " + valueWhiteStyle.Render(item.Path) + "\n")
-		} else {
-			b.WriteString(lineStyle.Render(line) + "\n")
-		}
+		b.WriteString(m.renderCheckboxFileLine(cursor, check, item.Status, item.Path, i == m.commitCursor) + "\n")
 	}
 
 	b.WriteString("\n")
@@ -1954,16 +1943,13 @@ func (m model) viewCommitSelect() string {
 		item := m.commitItems[i]
 
 		cursor := " "
-		lineStyle := normalStyle
-
 		if i == m.commitCursor {
 			cursor = ">"
-			lineStyle = selectedStyle
 		}
 
-		check := checkboxStyle.Render("[ ]")
+		check := "[ ]"
 		if item.Selected {
-			check = checkedStyle.Render("[x]")
+			check = "[x]"
 		}
 
 		status := item.Status
@@ -1971,15 +1957,7 @@ func (m model) viewCommitSelect() string {
 			status = "? add"
 		}
 
-		line := fmt.Sprintf("%s %s %-8s %s", cursor, check, status, item.Path)
-
-		if i == m.commitCursor {
-			b.WriteString(m.renderCheckboxListLine(line, true, item.Selected) + "\n")
-		} else if item.Selected {
-			b.WriteString(checkedStyle.Render(line) + "\n")
-		} else {
-			b.WriteString(lineStyle.Render(line) + "\n")
-		}
+		b.WriteString(m.renderCheckboxFileLine(cursor, check, status, item.Path, i == m.commitCursor) + "\n")
 	}
 
 	b.WriteString("\n")
@@ -2007,33 +1985,17 @@ func (m model) viewPartialHunkSelect() string {
 		hunk := m.partialHunks[i]
 
 		cursor := " "
-		lineStyle := normalStyle
-
 		if i == m.partialHunkCursor {
 			cursor = ">"
-			lineStyle = selectedStyle
 		}
 
-		check := checkboxStyle.Render("[ ]")
+		check := "[ ]"
 		if hunk.Selected {
-			check = checkedStyle.Render("[x]")
+			check = "[x]"
 		}
 
-		addInfo := diffAddedStyle.Render(fmt.Sprintf("+%d", hunk.Added))
-		removeInfo := diffDeletedStyle.Render(fmt.Sprintf("-%d", hunk.Removed))
-		headerText := hunk.Header
-		if hunk.Added > 0 && hunk.Removed > 0 {
-			headerText = diffModifiedStyle.Render(headerText)
-		}
-
-		summary := fmt.Sprintf("%s %s hunk %d  %s  %s %s", cursor, check, i+1, headerText, addInfo, removeInfo)
-		if i == m.partialHunkCursor {
-			b.WriteString(m.renderCheckboxListLine(summary, true, hunk.Selected) + "\n")
-		} else if hunk.Selected {
-			b.WriteString(checkedStyle.Render(summary) + "\n")
-		} else {
-			b.WriteString(lineStyle.Render(summary) + "\n")
-		}
+		summary := fmt.Sprintf("%s %s hunk %d  %s  +%d -%d", cursor, check, i+1, hunk.Header, hunk.Added, hunk.Removed)
+		b.WriteString(m.renderCheckboxListLine(summary, i == m.partialHunkCursor) + "\n")
 
 		for _, previewLine := range renderPartialHunkPreview(hunk, 8) {
 			b.WriteString("      " + previewLine + "\n")
@@ -2065,27 +2027,16 @@ func (m model) viewRevertSelect() string {
 		item := m.commitItems[i]
 
 		cursor := " "
-		lineStyle := normalStyle
-
 		if i == m.commitCursor {
 			cursor = ">"
-			lineStyle = selectedStyle
 		}
 
-		check := checkboxStyle.Render("[ ]")
+		check := "[ ]"
 		if item.Selected {
-			check = checkedStyle.Render("[x]")
+			check = "[x]"
 		}
 
-		line := fmt.Sprintf("%s %s %-8s %s", cursor, check, item.Status, item.Path)
-
-		if i == m.commitCursor {
-			b.WriteString(m.renderCheckboxListLine(line, true, item.Selected) + "\n")
-		} else if item.Selected {
-			b.WriteString(checkedStyle.Render(line) + "\n")
-		} else {
-			b.WriteString(lineStyle.Render(line) + "\n")
-		}
+		b.WriteString(m.renderCheckboxFileLine(cursor, check, item.Status, item.Path, i == m.commitCursor) + "\n")
 	}
 
 	b.WriteString("\n")
@@ -2095,11 +2046,34 @@ func (m model) viewRevertSelect() string {
 	return b.String()
 }
 
-func (m model) renderCheckboxListLine(line string, focused bool, selected bool) string {
-	styledLine := normalStyle.Render(line)
+func (m model) renderCheckboxFileLine(cursor, check, status, path string, focused bool) string {
+	selected := check == "[x]"
+
+	prefixStyle := checkboxStyle
 	if selected {
-		styledLine = checkedStyle.Render(line)
+		prefixStyle = checkedStyle
 	}
+
+	styledLine := prefixStyle.Render(cursor + " " + check + " ")
+	styledLine += renderSVNStatusLabel(status, 8)
+	styledLine += " "
+
+	if focused {
+		styledLine += labelMauveStyle.Render(path)
+	} else {
+		styledLine += checkboxListItemStyle.Render(path)
+	}
+
+	if focused {
+		width := max(20, m.width-2)
+		return checkboxFocusedLineStyle.Render(visiblePadRight(styledLine, width))
+	}
+
+	return styledLine
+}
+
+func (m model) renderCheckboxListLine(line string, focused bool) string {
+	styledLine := checkboxListItemStyle.Render(line)
 
 	if focused {
 		width := max(20, m.width-2)
@@ -2511,6 +2485,30 @@ func colorizePullStatus(status string) string {
 	return statusStyleForSVNPathAction(status).Render(fmt.Sprintf("%-8s", status))
 }
 
+func renderSVNStatusLabel(status string, width int) string {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		status = " "
+	}
+
+	fields := strings.Fields(status)
+	primary := status
+	suffix := ""
+	if len(fields) > 0 {
+		primary = fields[0]
+		if len(fields) > 1 {
+			suffix = " " + strings.Join(fields[1:], " ")
+		}
+	}
+
+	rendered := statusStyleForSVNPathAction(primary).Render(primary)
+	if suffix != "" {
+		rendered += mutedStyle.Render(suffix)
+	}
+
+	return visiblePadRight(rendered, width)
+}
+
 func parseSVNStatusLine(line string) (string, string, bool) {
 	if isSVNStatusNoiseLine(line) || len(line) < 8 {
 		return "", "", false
@@ -2817,6 +2815,18 @@ func switchBranchCmd(r repo, branchName string) tea.Cmd {
 		output.WriteString("Switching to branch: " + branchName + "\n")
 		output.WriteString("Target URL: " + branchURL + "\n\n")
 
+		output.WriteString("Running cleanup before switch...\n\n")
+		cleanupOut, cleanupErr := svn(r, "cleanup")
+		output.WriteString(cleanupOut)
+		if cleanupErr != nil {
+			return commandResult{
+				Output:          output.String(),
+				Err:             fmt.Errorf("svn cleanup before switch failed: %w", cleanupErr),
+				CurrentLocation: getCurrentLocation(r),
+			}
+		}
+
+		output.WriteString("Running: svn switch --ignore-ancestry " + branchURL + "\n\n")
 		out, err := svn(
 			r,
 			"switch",
@@ -2824,10 +2834,25 @@ func switchBranchCmd(r repo, branchName string) tea.Cmd {
 			branchURL,
 		)
 
-		output.WriteString(out)
+		output.WriteString(colorizeSVNUpdateOutput(out))
 
 		if err == nil {
-			output.WriteString("\nSwitched to branch " + branchName + " successfully.")
+			output.WriteString("\nSwitch finished successfully. Updating branch to HEAD...\n\n")
+			updateOut, updateErr := svn(r, "update")
+			output.WriteString(colorizeSVNUpdateOutput(updateOut))
+			if updateErr != nil {
+				output.WriteString("\n\nUpdate after switch failed or was interrupted. Running cleanup...\n\n")
+				cleanupOut, cleanupErr = svn(r, "cleanup")
+				output.WriteString(cleanupOut)
+				if cleanupErr != nil {
+					updateErr = fmt.Errorf("svn update after switch failed: %w; cleanup after failure also failed: %v", updateErr, cleanupErr)
+				}
+				err = updateErr
+			}
+		}
+
+		if err == nil {
+			output.WriteString("\nSwitched to branch " + branchName + " and updated to HEAD successfully.")
 		}
 
 		return commandResult{
@@ -2851,6 +2876,18 @@ func switchTrunkCmd(r repo) tea.Cmd {
 		output.WriteString("Switching to trunk\n")
 		output.WriteString("Target URL: " + trunkURL + "\n\n")
 
+		output.WriteString("Running cleanup before switch...\n\n")
+		cleanupOut, cleanupErr := svn(r, "cleanup")
+		output.WriteString(cleanupOut)
+		if cleanupErr != nil {
+			return commandResult{
+				Output:          output.String(),
+				Err:             fmt.Errorf("svn cleanup before switch failed: %w", cleanupErr),
+				CurrentLocation: getCurrentLocation(r),
+			}
+		}
+
+		output.WriteString("Running: svn switch --ignore-ancestry " + trunkURL + "\n\n")
 		out, err := svn(
 			r,
 			"switch",
@@ -2858,10 +2895,25 @@ func switchTrunkCmd(r repo) tea.Cmd {
 			trunkURL,
 		)
 
-		output.WriteString(out)
+		output.WriteString(colorizeSVNUpdateOutput(out))
 
 		if err == nil {
-			output.WriteString("\nSwitched back to trunk successfully.")
+			output.WriteString("\nSwitch finished successfully. Updating trunk to HEAD...\n\n")
+			updateOut, updateErr := svn(r, "update")
+			output.WriteString(colorizeSVNUpdateOutput(updateOut))
+			if updateErr != nil {
+				output.WriteString("\n\nUpdate after switch failed or was interrupted. Running cleanup...\n\n")
+				cleanupOut, cleanupErr = svn(r, "cleanup")
+				output.WriteString(cleanupOut)
+				if cleanupErr != nil {
+					updateErr = fmt.Errorf("svn update after switch failed: %w; cleanup after failure also failed: %v", updateErr, cleanupErr)
+				}
+				err = updateErr
+			}
+		}
+
+		if err == nil {
+			output.WriteString("\nSwitched back to trunk and updated to HEAD successfully.")
 		}
 
 		return commandResult{
@@ -2893,15 +2945,6 @@ func pullCmd(r repo, paths []string) tea.Cmd {
 			output.WriteString("Auth password: NOT SET\n")
 		}
 
-		cleanedPaths := cleanSVNPathList(paths)
-		if len(cleanedPaths) == 0 {
-			return commandResult{
-				Output:          output.String() + "\nNo valid SVN paths were selected for pull.",
-				Err:             fmt.Errorf("no valid SVN paths selected"),
-				CurrentLocation: getCurrentLocation(r),
-			}
-		}
-
 		output.WriteString("\nRunning cleanup before pull...\n\n")
 		cleanupOut, cleanupErr := svn(r, "cleanup")
 		output.WriteString(cleanupOut)
@@ -2913,13 +2956,21 @@ func pullCmd(r repo, paths []string) tea.Cmd {
 			}
 		}
 
-		args := []string{"update", "--"}
-		args = append(args, cleanedPaths...)
+		cleanedPaths := cleanSVNPathList(paths)
+		args := []string{"update"}
 
-		output.WriteString("Selected files:\n")
-		for _, path := range cleanedPaths {
-			output.WriteString("  " + path + "\n")
+		if len(cleanedPaths) > 0 {
+			args = append(args, "--")
+			args = append(args, cleanedPaths...)
+
+			output.WriteString("Selected files:\n")
+			for _, path := range cleanedPaths {
+				output.WriteString("  " + path + "\n")
+			}
+		} else {
+			output.WriteString("Pull mode: all incoming changes\n")
 		}
+
 		output.WriteString("\nRunning: svn " + strings.Join(args, " ") + "\n\n")
 
 		out, err := svn(r, args...)
@@ -4229,14 +4280,20 @@ func revisionTreeRootPath(path string) (string, string) {
 }
 
 func statusStyleForSVNPathAction(action string) lipgloss.Style {
-	switch strings.ToUpper(strings.TrimSpace(action)) {
-	case "A":
+	action = strings.ToUpper(strings.TrimSpace(action))
+	if action == "" {
+		return textStyle
+	}
+
+	primary := strings.Fields(action)[0]
+	switch primary {
+	case "A", "U", "G":
 		return successStyle
-	case "D":
+	case "D", "!":
 		return errorStyle
 	case "M":
 		return actionStyle
-	case "R":
+	case "R", "?", "C", "~":
 		return warningStyle
 	default:
 		return textStyle
