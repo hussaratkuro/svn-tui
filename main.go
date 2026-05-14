@@ -263,6 +263,10 @@ var (
 			Foreground(catYellow).
 			Bold(true)
 
+	checkboxFocusedLineStyle = lipgloss.NewStyle().
+					Background(lipgloss.Color("#1e1e2e")).
+					Foreground(catText)
+
 	labelMauveStyle = lipgloss.NewStyle().
 			Foreground(catMauve).
 			Bold(true)
@@ -1917,7 +1921,9 @@ func (m model) viewPullSelect() string {
 		status := colorizePullStatus(item.Status)
 		line := fmt.Sprintf("%s %s ", cursor, check) + status + " " + valueWhiteStyle.Render(item.Path)
 
-		if item.Selected && i != m.commitCursor {
+		if i == m.commitCursor {
+			b.WriteString(m.renderCheckboxListLine(line, true, false) + "\n")
+		} else if item.Selected {
 			b.WriteString(checkedStyle.Render(fmt.Sprintf("%s %s ", cursor, "[x]")) + status + " " + valueWhiteStyle.Render(item.Path) + "\n")
 		} else {
 			b.WriteString(lineStyle.Render(line) + "\n")
@@ -1968,7 +1974,9 @@ func (m model) viewCommitSelect() string {
 
 		line := fmt.Sprintf("%s %s %-8s %s", cursor, check, status, item.Path)
 
-		if item.Selected && i != m.commitCursor {
+		if i == m.commitCursor {
+			b.WriteString(m.renderCheckboxListLine(line, true, false) + "\n")
+		} else if item.Selected {
 			b.WriteString(checkedStyle.Render(line) + "\n")
 		} else {
 			b.WriteString(lineStyle.Render(line) + "\n")
@@ -2020,7 +2028,9 @@ func (m model) viewPartialHunkSelect() string {
 		}
 
 		summary := fmt.Sprintf("%s %s hunk %d  %s  %s %s", cursor, check, i+1, headerText, addInfo, removeInfo)
-		if hunk.Selected && i != m.partialHunkCursor {
+		if i == m.partialHunkCursor {
+			b.WriteString(m.renderCheckboxListLine(summary, true, false) + "\n")
+		} else if hunk.Selected {
 			b.WriteString(checkedStyle.Render(summary) + "\n")
 		} else {
 			b.WriteString(lineStyle.Render(summary) + "\n")
@@ -2070,7 +2080,9 @@ func (m model) viewRevertSelect() string {
 
 		line := fmt.Sprintf("%s %s %-8s %s", cursor, check, item.Status, item.Path)
 
-		if item.Selected && i != m.commitCursor {
+		if i == m.commitCursor {
+			b.WriteString(m.renderCheckboxListLine(line, true, false) + "\n")
+		} else if item.Selected {
 			b.WriteString(checkedStyle.Render(line) + "\n")
 		} else {
 			b.WriteString(lineStyle.Render(line) + "\n")
@@ -2082,6 +2094,19 @@ func (m model) viewRevertSelect() string {
 	b.WriteString(mutedStyle.Render("Space: select | a: all | n: none | d: side-by-side diff | Enter: revert selected | Esc: back"))
 
 	return b.String()
+}
+
+func (m model) renderCheckboxListLine(line string, focused bool, selected bool) string {
+	if focused {
+		width := max(20, m.width-2)
+		return checkboxFocusedLineStyle.Render(visiblePadRight(line, width))
+	}
+
+	if selected {
+		return checkedStyle.Render(line)
+	}
+
+	return normalStyle.Render(line)
 }
 
 func renderPartialHunkPreview(h partialHunk, maxChangedLines int) []string {
