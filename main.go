@@ -263,12 +263,6 @@ var (
 			Foreground(catYellow).
 			Bold(true)
 
-	checkboxListItemStyle = lipgloss.NewStyle().
-				Foreground(catYellow)
-
-	checkboxFocusedLineStyle = lipgloss.NewStyle().
-					Background(lipgloss.Color("#1e1e2e"))
-
 	labelMauveStyle = lipgloss.NewStyle().
 			Foreground(catMauve).
 			Bold(true)
@@ -781,42 +775,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func isTextInputScreen(s screen) bool {
-	switch s {
-	case screenCreateBranchInput,
-		screenCheckoutRevisionInput,
-		screenCommitMessageInput,
-		screenFileHistorySearch:
-		return true
-	default:
-		return false
-	}
-}
-
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	key := msg.String()
-
-	if key == "ctrl+c" {
+	switch msg.String() {
+	case "ctrl+c":
 		return m, tea.Quit
-	}
 
-	// Text input screens must receive normal character keys before global shortcuts.
-	// Without this, typing letters such as "q" in a commit message triggers the
-	// global quit/back shortcut instead of inserting the character.
-	if isTextInputScreen(m.screen) && key != "esc" {
-		switch m.screen {
-		case screenCreateBranchInput:
-			return m.updateCreateBranchInput(msg)
-		case screenCheckoutRevisionInput:
-			return m.updateCheckoutRevisionInput(msg)
-		case screenFileHistorySearch:
-			return m.updateFileHistorySearch(msg)
-		case screenCommitMessageInput:
-			return m.updateCommitMessageInput(msg)
-		}
-	}
-
-	switch key {
 	case "a":
 		if m.screen == screenHistory && m.selectedAction == actionRevisionTree {
 			m.screen = screenRunning
@@ -844,7 +807,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = screenRepoSelect
 
 		case screenDiff:
-			if m.selectedAction == actionRevertFiles {
+			if m.selectedAction == actionPull {
+				m.screen = screenPullSelect
+			} else if m.selectedAction == actionRevertFiles {
 				m.screen = screenRevertSelect
 			} else {
 				m.screen = screenCommitSelect
@@ -999,8 +964,8 @@ func (m model) updateActionSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch m.selectedAction {
 		case actionPull:
 			m.screen = screenRunning
-			m.runningTitle = "Pulling all changes..."
-			return m, pullCmd(m.activeRepo, nil)
+			m.runningTitle = "Loading incoming pull changes..."
+			return m, loadPullItemsCmd(m.activeRepo)
 
 		case actionStatus:
 			m.screen = screenRunning
@@ -1031,7 +996,7 @@ func (m model) updateActionSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		case actionSwitchTrunk:
 			m.screen = screenRunning
-			m.runningTitle = "Switching to trunk and updating..."
+			m.runningTitle = "Switching to trunk..."
 			return m, switchTrunkCmd(m.activeRepo)
 
 		case actionCommit:
@@ -1247,7 +1212,7 @@ func (m model) updateBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		selected := m.branches[selectedIndex]
 
 		m.screen = screenRunning
-		m.runningTitle = "Switching to branch and updating..."
+		m.runningTitle = "Switching to branch..."
 		m.branchNumberInput = ""
 		return m, switchBranchCmd(m.activeRepo, selected.Name)
 
@@ -1392,7 +1357,25 @@ func (m model) updateCommitSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		m.screen = screenRunning
 		m.runningTitle = "Loading side-by-side diff..."
-		return m, diffCmd(m.activeRepo, item, m.viewport.Width)
+		return m, diffCmd(m.activeRepo, item, m.width)
+
+	case "r":
+		paths := selectedMissingVersionedPaths(m.commitItems)
+		if len(paths) == 0 && len(m.commitItems) > 0 && isMissingVersionedItem(m.commitItems[m.commitCursor]) {
+			paths = []string{m.commitItems[m.commitCursor].Path}
+		}
+
+		if len(paths) == 0 {
+			m.screen = screenResult
+			m.err = fmt.Errorf("no missing versioned paths selected")
+			m.result = "Select at least one ! path with Space, or move the cursor to a ! path, then press r."
+			m.viewport.SetContent(m.result + "\n\n" + m.err.Error())
+			return m, nil
+		}
+
+		m.screen = screenRunning
+		m.runningTitle = "Marking missing paths as deleted..."
+		return m, deleteMissingPathsCmd(m.activeRepo, paths)
 
 	case "p":
 		if len(m.commitItems) == 0 {
@@ -1552,7 +1535,7 @@ func (m model) updateRevertSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		m.screen = screenRunning
 		m.runningTitle = "Loading side-by-side diff..."
-		return m, diffCmd(m.activeRepo, item, m.viewport.Width)
+		return m, diffCmd(m.activeRepo, item, m.width)
 
 	case "enter":
 		paths := selectedCommitPaths(m.commitItems)
@@ -1906,16 +1889,26 @@ func (m model) viewPullSelect() string {
 		item := m.commitItems[i]
 
 		cursor := " "
+		lineStyle := normalStyle
+
 		if i == m.commitCursor {
 			cursor = ">"
+			lineStyle = selectedStyle
 		}
 
-		check := "[ ]"
+		check := checkboxStyle.Render("[ ]")
 		if item.Selected {
-			check = "[x]"
+			check = checkedStyle.Render("[x]")
 		}
 
-		b.WriteString(m.renderCheckboxFileLine(cursor, check, item.Status, item.Path, i == m.commitCursor) + "\n")
+		status := colorizePullStatus(item.Status)
+		line := fmt.Sprintf("%s %s ", cursor, check) + status + " " + valueWhiteStyle.Render(item.Path)
+
+		if item.Selected && i != m.commitCursor {
+			b.WriteString(checkedStyle.Render(fmt.Sprintf("%s %s ", cursor, "[x]")) + status + " " + valueWhiteStyle.Render(item.Path) + "\n")
+		} else {
+			b.WriteString(lineStyle.Render(line) + "\n")
+		}
 	}
 
 	b.WriteString("\n")
@@ -1943,13 +1936,16 @@ func (m model) viewCommitSelect() string {
 		item := m.commitItems[i]
 
 		cursor := " "
+		lineStyle := normalStyle
+
 		if i == m.commitCursor {
 			cursor = ">"
+			lineStyle = selectedStyle
 		}
 
-		check := "[ ]"
+		check := checkboxStyle.Render("[ ]")
 		if item.Selected {
-			check = "[x]"
+			check = checkedStyle.Render("[x]")
 		}
 
 		status := item.Status
@@ -1957,12 +1953,18 @@ func (m model) viewCommitSelect() string {
 			status = "? add"
 		}
 
-		b.WriteString(m.renderCheckboxFileLine(cursor, check, status, item.Path, i == m.commitCursor) + "\n")
+		line := fmt.Sprintf("%s %s %-8s %s", cursor, check, status, item.Path)
+
+		if item.Selected && i != m.commitCursor {
+			b.WriteString(checkedStyle.Render(line) + "\n")
+		} else {
+			b.WriteString(lineStyle.Render(line) + "\n")
+		}
 	}
 
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render(scrollHint(m.commitOffset, end, len(m.commitItems))) + "\n")
-	b.WriteString(mutedStyle.Render("Space: select | a: all | n: none | d: diff | p: partial hunks | Enter: commit message | Esc: back"))
+	b.WriteString(mutedStyle.Render("Space: select | a: all | n: none | d: diff | p: partial hunks | r: svn delete --force selected ! | Enter: commit message | Esc: back"))
 
 	return b.String()
 }
@@ -1985,17 +1987,31 @@ func (m model) viewPartialHunkSelect() string {
 		hunk := m.partialHunks[i]
 
 		cursor := " "
+		lineStyle := normalStyle
+
 		if i == m.partialHunkCursor {
 			cursor = ">"
+			lineStyle = selectedStyle
 		}
 
-		check := "[ ]"
+		check := checkboxStyle.Render("[ ]")
 		if hunk.Selected {
-			check = "[x]"
+			check = checkedStyle.Render("[x]")
 		}
 
-		summary := fmt.Sprintf("%s %s hunk %d  %s  +%d -%d", cursor, check, i+1, hunk.Header, hunk.Added, hunk.Removed)
-		b.WriteString(m.renderCheckboxListLine(summary, i == m.partialHunkCursor) + "\n")
+		addInfo := diffAddedStyle.Render(fmt.Sprintf("+%d", hunk.Added))
+		removeInfo := diffDeletedStyle.Render(fmt.Sprintf("-%d", hunk.Removed))
+		headerText := hunk.Header
+		if hunk.Added > 0 && hunk.Removed > 0 {
+			headerText = diffModifiedStyle.Render(headerText)
+		}
+
+		summary := fmt.Sprintf("%s %s hunk %d  %s  %s %s", cursor, check, i+1, headerText, addInfo, removeInfo)
+		if hunk.Selected && i != m.partialHunkCursor {
+			b.WriteString(checkedStyle.Render(summary) + "\n")
+		} else {
+			b.WriteString(lineStyle.Render(summary) + "\n")
+		}
 
 		for _, previewLine := range renderPartialHunkPreview(hunk, 8) {
 			b.WriteString("      " + previewLine + "\n")
@@ -2027,16 +2043,25 @@ func (m model) viewRevertSelect() string {
 		item := m.commitItems[i]
 
 		cursor := " "
+		lineStyle := normalStyle
+
 		if i == m.commitCursor {
 			cursor = ">"
+			lineStyle = selectedStyle
 		}
 
-		check := "[ ]"
+		check := checkboxStyle.Render("[ ]")
 		if item.Selected {
-			check = "[x]"
+			check = checkedStyle.Render("[x]")
 		}
 
-		b.WriteString(m.renderCheckboxFileLine(cursor, check, item.Status, item.Path, i == m.commitCursor) + "\n")
+		line := fmt.Sprintf("%s %s %-8s %s", cursor, check, item.Status, item.Path)
+
+		if item.Selected && i != m.commitCursor {
+			b.WriteString(checkedStyle.Render(line) + "\n")
+		} else {
+			b.WriteString(lineStyle.Render(line) + "\n")
+		}
 	}
 
 	b.WriteString("\n")
@@ -2044,43 +2069,6 @@ func (m model) viewRevertSelect() string {
 	b.WriteString(mutedStyle.Render("Space: select | a: all | n: none | d: side-by-side diff | Enter: revert selected | Esc: back"))
 
 	return b.String()
-}
-
-func (m model) renderCheckboxFileLine(cursor, check, status, path string, focused bool) string {
-	selected := check == "[x]"
-
-	prefixStyle := checkboxStyle
-	if selected {
-		prefixStyle = checkedStyle
-	}
-
-	styledLine := prefixStyle.Render(cursor + " " + check + " ")
-	styledLine += renderSVNStatusLabel(status, 8)
-	styledLine += " "
-
-	if focused {
-		styledLine += labelMauveStyle.Render(path)
-	} else {
-		styledLine += checkboxListItemStyle.Render(path)
-	}
-
-	if focused {
-		width := max(20, m.width-2)
-		return checkboxFocusedLineStyle.Render(visiblePadRight(styledLine, width))
-	}
-
-	return styledLine
-}
-
-func (m model) renderCheckboxListLine(line string, focused bool) string {
-	styledLine := checkboxListItemStyle.Render(line)
-
-	if focused {
-		width := max(20, m.width-2)
-		return checkboxFocusedLineStyle.Render(visiblePadRight(styledLine, width))
-	}
-
-	return styledLine
 }
 
 func renderPartialHunkPreview(h partialHunk, maxChangedLines int) []string {
@@ -2279,7 +2267,7 @@ func (m model) viewDiff() string {
 	b.WriteString(repoInfoHeader("Side-by-side diff viewer", m.activeRepo))
 	b.WriteString(mutedStyle.Render("Legend: = same | - removed/old | + added/new | ~ changed") + "\n")
 	b.WriteString(mutedStyle.Render("↑/↓: scroll | PgUp/PgDn: page | Home/End: jump | Esc: back") + "\n\n")
-	b.WriteString(m.viewport.View())
+	b.WriteString(textStyle.Render(m.viewport.View()))
 
 	return b.String()
 }
@@ -2447,30 +2435,27 @@ func parseSVNDiffSummaryLine(line string) (commitItem, bool) {
 }
 
 func parseSVNStatusUpdateLine(line string) (commitItem, bool) {
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" || strings.HasPrefix(trimmed, "Status against revision") {
+	if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "Status against revision") {
 		return commitItem{}, false
 	}
 
-	prefixLen := min(len(line), 24)
+	prefixLen := min(len(line), 9)
 	if !strings.Contains(line[:prefixLen], "*") {
 		return commitItem{}, false
 	}
 
-	status, path, ok := parseSVNStatusLine(line)
-	if !ok {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
 		return commitItem{}, false
 	}
 
-	if strings.TrimSpace(status) == "" {
-		status = "U"
-	}
-
-	fields := strings.Fields(line)
-	if len(fields) > 0 {
-		last := strings.TrimPrefix(filepath.ToSlash(fields[len(fields)-1]), "./")
-		if isSafeSVNWorkingCopyPath(last) {
-			path = last
+	path := fields[len(fields)-1]
+	path = strings.TrimPrefix(filepath.ToSlash(path), "./")
+	status := "U"
+	if len(strings.TrimSpace(line)) > 0 {
+		first := strings.TrimSpace(line)[0]
+		if first == 'A' || first == 'D' || first == 'M' || first == 'R' {
+			status = string(first)
 		}
 	}
 
@@ -2483,121 +2468,6 @@ func colorizePullStatus(status string) string {
 		status = "U"
 	}
 	return statusStyleForSVNPathAction(status).Render(fmt.Sprintf("%-8s", status))
-}
-
-func renderSVNStatusLabel(status string, width int) string {
-	status = strings.TrimSpace(status)
-	if status == "" {
-		status = " "
-	}
-
-	fields := strings.Fields(status)
-	primary := status
-	suffix := ""
-	if len(fields) > 0 {
-		primary = fields[0]
-		if len(fields) > 1 {
-			suffix = " " + strings.Join(fields[1:], " ")
-		}
-	}
-
-	rendered := statusStyleForSVNPathAction(primary).Render(primary)
-	if suffix != "" {
-		rendered += mutedStyle.Render(suffix)
-	}
-
-	return visiblePadRight(rendered, width)
-}
-
-func parseSVNStatusLine(line string) (string, string, bool) {
-	if isSVNStatusNoiseLine(line) || len(line) < 8 {
-		return "", "", false
-	}
-
-	statusArea := line[:8]
-	if strings.TrimSpace(statusArea) == ">" || !isValidSVNStatusArea(statusArea) {
-		return "", "", false
-	}
-
-	path := strings.TrimSpace(line[8:])
-	path = strings.TrimPrefix(filepath.ToSlash(path), "./")
-	if !isSafeSVNWorkingCopyPath(path) {
-		return "", "", false
-	}
-
-	return strings.TrimSpace(statusArea), path, true
-}
-
-func isValidSVNStatusArea(statusArea string) bool {
-	if len(statusArea) == 0 {
-		return false
-	}
-
-	hasStatus := false
-	allowed := "ACDMR?!~IXL+SKOC"
-	for _, r := range statusArea {
-		if r == ' ' || r == '\t' {
-			continue
-		}
-		if !strings.ContainsRune(allowed, r) {
-			return false
-		}
-		hasStatus = true
-	}
-
-	return hasStatus
-}
-
-func isSVNStatusNoiseLine(line string) bool {
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" {
-		return true
-	}
-
-	lower := strings.ToLower(trimmed)
-	noisePrefixes := []string{
-		">",
-		"summary of conflicts:",
-		"text conflicts:",
-		"property conflicts:",
-		"tree conflicts:",
-		"local ",
-		"incoming ",
-		"of conflicts:",
-		"conflicts:",
-	}
-	for _, prefix := range noisePrefixes {
-		if strings.HasPrefix(lower, prefix) {
-			return true
-		}
-	}
-
-	return false
-}
-
-func isSafeSVNWorkingCopyPath(path string) bool {
-	path = strings.TrimSpace(path)
-	if path == "" || path == "." || path == ".." || strings.HasPrefix(path, "-") {
-		return false
-	}
-
-	lower := strings.ToLower(path)
-	noiseFragments := []string{
-		"local dir edit",
-		"incoming dir delete",
-		"incoming file delete",
-		"summary of conflicts",
-		"tree conflicts:",
-		"text conflicts:",
-		"property conflicts:",
-	}
-	for _, fragment := range noiseFragments {
-		if strings.Contains(lower, fragment) {
-			return false
-		}
-	}
-
-	return true
 }
 
 func loadCommitItemsCmd(r repo) tea.Cmd {
@@ -2641,8 +2511,21 @@ func loadCommitItems(r repo, includeUnversioned bool) ([]commitItem, error) {
 			continue
 		}
 
-		status, path, ok := parseSVNStatusLine(line)
-		if !ok {
+		status := ""
+		path := ""
+
+		if len(line) >= 8 {
+			status = strings.TrimSpace(line[:8])
+			path = strings.TrimSpace(line[8:])
+		} else {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				status = fields[0]
+				path = fields[len(fields)-1]
+			}
+		}
+
+		if status == "" || path == "" {
 			continue
 		}
 
@@ -2700,8 +2583,21 @@ func loadConflictItems(r repo) ([]conflictItem, error) {
 			continue
 		}
 
-		status, path, ok := parseSVNStatusLine(line)
-		if !ok {
+		status := ""
+		path := ""
+
+		if len(line) >= 8 {
+			status = strings.TrimSpace(line[:8])
+			path = strings.TrimSpace(line[8:])
+		} else {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				status = fields[0]
+				path = fields[len(fields)-1]
+			}
+		}
+
+		if status == "" || path == "" {
 			continue
 		}
 
@@ -2815,18 +2711,6 @@ func switchBranchCmd(r repo, branchName string) tea.Cmd {
 		output.WriteString("Switching to branch: " + branchName + "\n")
 		output.WriteString("Target URL: " + branchURL + "\n\n")
 
-		output.WriteString("Running cleanup before switch...\n\n")
-		cleanupOut, cleanupErr := svn(r, "cleanup")
-		output.WriteString(cleanupOut)
-		if cleanupErr != nil {
-			return commandResult{
-				Output:          output.String(),
-				Err:             fmt.Errorf("svn cleanup before switch failed: %w", cleanupErr),
-				CurrentLocation: getCurrentLocation(r),
-			}
-		}
-
-		output.WriteString("Running: svn switch --ignore-ancestry " + branchURL + "\n\n")
 		out, err := svn(
 			r,
 			"switch",
@@ -2834,25 +2718,10 @@ func switchBranchCmd(r repo, branchName string) tea.Cmd {
 			branchURL,
 		)
 
-		output.WriteString(colorizeSVNUpdateOutput(out))
+		output.WriteString(out)
 
 		if err == nil {
-			output.WriteString("\nSwitch finished successfully. Updating branch to HEAD...\n\n")
-			updateOut, updateErr := svn(r, "update")
-			output.WriteString(colorizeSVNUpdateOutput(updateOut))
-			if updateErr != nil {
-				output.WriteString("\n\nUpdate after switch failed or was interrupted. Running cleanup...\n\n")
-				cleanupOut, cleanupErr = svn(r, "cleanup")
-				output.WriteString(cleanupOut)
-				if cleanupErr != nil {
-					updateErr = fmt.Errorf("svn update after switch failed: %w; cleanup after failure also failed: %v", updateErr, cleanupErr)
-				}
-				err = updateErr
-			}
-		}
-
-		if err == nil {
-			output.WriteString("\nSwitched to branch " + branchName + " and updated to HEAD successfully.")
+			output.WriteString("\nSwitched to branch " + branchName + " successfully.")
 		}
 
 		return commandResult{
@@ -2876,18 +2745,6 @@ func switchTrunkCmd(r repo) tea.Cmd {
 		output.WriteString("Switching to trunk\n")
 		output.WriteString("Target URL: " + trunkURL + "\n\n")
 
-		output.WriteString("Running cleanup before switch...\n\n")
-		cleanupOut, cleanupErr := svn(r, "cleanup")
-		output.WriteString(cleanupOut)
-		if cleanupErr != nil {
-			return commandResult{
-				Output:          output.String(),
-				Err:             fmt.Errorf("svn cleanup before switch failed: %w", cleanupErr),
-				CurrentLocation: getCurrentLocation(r),
-			}
-		}
-
-		output.WriteString("Running: svn switch --ignore-ancestry " + trunkURL + "\n\n")
 		out, err := svn(
 			r,
 			"switch",
@@ -2895,25 +2752,10 @@ func switchTrunkCmd(r repo) tea.Cmd {
 			trunkURL,
 		)
 
-		output.WriteString(colorizeSVNUpdateOutput(out))
+		output.WriteString(out)
 
 		if err == nil {
-			output.WriteString("\nSwitch finished successfully. Updating trunk to HEAD...\n\n")
-			updateOut, updateErr := svn(r, "update")
-			output.WriteString(colorizeSVNUpdateOutput(updateOut))
-			if updateErr != nil {
-				output.WriteString("\n\nUpdate after switch failed or was interrupted. Running cleanup...\n\n")
-				cleanupOut, cleanupErr = svn(r, "cleanup")
-				output.WriteString(cleanupOut)
-				if cleanupErr != nil {
-					updateErr = fmt.Errorf("svn update after switch failed: %w; cleanup after failure also failed: %v", updateErr, cleanupErr)
-				}
-				err = updateErr
-			}
-		}
-
-		if err == nil {
-			output.WriteString("\nSwitched back to trunk and updated to HEAD successfully.")
+			output.WriteString("\nSwitched back to trunk successfully.")
 		}
 
 		return commandResult{
@@ -2945,45 +2787,17 @@ func pullCmd(r repo, paths []string) tea.Cmd {
 			output.WriteString("Auth password: NOT SET\n")
 		}
 
-		output.WriteString("\nRunning cleanup before pull...\n\n")
-		cleanupOut, cleanupErr := svn(r, "cleanup")
-		output.WriteString(cleanupOut)
-		if cleanupErr != nil {
-			return commandResult{
-				Output:          output.String(),
-				Err:             fmt.Errorf("svn cleanup before pull failed: %w", cleanupErr),
-				CurrentLocation: getCurrentLocation(r),
-			}
-		}
-
-		cleanedPaths := cleanSVNPathList(paths)
 		args := []string{"update"}
+		args = append(args, paths...)
 
-		if len(cleanedPaths) > 0 {
-			args = append(args, "--")
-			args = append(args, cleanedPaths...)
-
-			output.WriteString("Selected files:\n")
-			for _, path := range cleanedPaths {
-				output.WriteString("  " + path + "\n")
-			}
-		} else {
-			output.WriteString("Pull mode: all incoming changes\n")
+		output.WriteString("Selected files:\n")
+		for _, path := range paths {
+			output.WriteString("  " + path + "\n")
 		}
-
 		output.WriteString("\nRunning: svn " + strings.Join(args, " ") + "\n\n")
 
 		out, err := svn(r, args...)
 		output.WriteString(colorizeSVNUpdateOutput(out))
-
-		if err != nil {
-			output.WriteString("\n\nUpdate failed or was interrupted. Running cleanup after failed pull...\n\n")
-			cleanupOut, cleanupErr = svn(r, "cleanup")
-			output.WriteString(cleanupOut)
-			if cleanupErr != nil {
-				err = fmt.Errorf("svn update failed: %w; cleanup after failure also failed: %v", err, cleanupErr)
-			}
-		}
 
 		if err == nil {
 			output.WriteString("\nPull finished successfully.")
@@ -3059,6 +2873,46 @@ func checkoutRevisionCmd(r repo, revision string) tea.Cmd {
 	}
 }
 
+func deleteMissingPathsCmd(r repo, paths []string) tea.Cmd {
+	return func() tea.Msg {
+		paths = compactSVNPaths(paths)
+		var output strings.Builder
+
+		output.WriteString("Working copy: " + r.Path + "\n")
+		output.WriteString("Selected ! paths to mark as deleted with svn delete --force:\n")
+		for _, p := range paths {
+			output.WriteString("  " + p + "\n")
+		}
+
+		if len(paths) == 0 {
+			return commandResult{
+				Output:          output.String() + "\nNo usable ! paths were selected.",
+				Err:             fmt.Errorf("no missing versioned paths selected"),
+				CurrentLocation: getCurrentLocation(r),
+			}
+		}
+
+		output.WriteString("\nRunning: svn delete --force -- <paths...>\n\n")
+
+		args := []string{"delete", "--force", "--"}
+		args = append(args, paths...)
+
+		out, err := svn(r, args...)
+		output.WriteString(out)
+
+		if err == nil {
+			output.WriteString("\nMissing paths were marked as deleted.")
+			output.WriteString("\nGo back to Commit, review the D entries, then commit them.")
+		}
+
+		return commandResult{
+			Output:          output.String(),
+			Err:             err,
+			CurrentLocation: getCurrentLocation(r),
+		}
+	}
+}
+
 func commitCmd(r repo, items []commitItem, message string) tea.Cmd {
 	return func() tea.Msg {
 		var output strings.Builder
@@ -3124,7 +2978,7 @@ func diffCmd(r repo, item commitItem, width int) tea.Cmd {
 		out, err := buildSideBySideDiff(r, item, width)
 
 		if err != nil {
-			fallbackOut, fallbackErr := svn(r, "diff", "--", item.Path)
+			fallbackOut, fallbackErr := svn(r, "diff", item.Path)
 			if fallbackOut != "" {
 				out += "\n\nUnified svn diff fallback:\n\n" + fallbackOut
 			}
@@ -3188,8 +3042,6 @@ func revertCmd(r repo, paths []string) tea.Cmd {
 	return func() tea.Msg {
 		var output strings.Builder
 
-		paths = cleanSVNPathList(paths)
-
 		output.WriteString("Working copy: " + r.Path + "\n")
 		output.WriteString("Selected files to revert:\n")
 
@@ -3199,15 +3051,7 @@ func revertCmd(r repo, paths []string) tea.Cmd {
 
 		output.WriteString("\nRunning revert...\n\n")
 
-		if len(paths) == 0 {
-			return commandResult{
-				Output:          output.String() + "\nNo valid SVN paths were selected for revert.",
-				Err:             fmt.Errorf("no valid SVN paths selected"),
-				CurrentLocation: getCurrentLocation(r),
-			}
-		}
-
-		args := []string{"revert", "--"}
+		args := []string{"revert"}
 		args = append(args, paths...)
 
 		out, err := svn(r, args...)
@@ -4280,20 +4124,14 @@ func revisionTreeRootPath(path string) (string, string) {
 }
 
 func statusStyleForSVNPathAction(action string) lipgloss.Style {
-	action = strings.ToUpper(strings.TrimSpace(action))
-	if action == "" {
-		return textStyle
-	}
-
-	primary := strings.Fields(action)[0]
-	switch primary {
-	case "A", "U", "G":
+	switch strings.ToUpper(strings.TrimSpace(action)) {
+	case "A":
 		return successStyle
-	case "D", "!":
+	case "D":
 		return errorStyle
 	case "M":
 		return actionStyle
-	case "R", "?", "C", "~":
+	case "R":
 		return warningStyle
 	default:
 		return textStyle
@@ -4385,7 +4223,7 @@ func loadPartialHunks(r repo, item commitItem) ([]partialHunk, error) {
 		return nil, fmt.Errorf("partial commit is only supported for files")
 	}
 
-	out, err := svn(r, "diff", "--", item.Path)
+	out, err := svn(r, "diff", item.Path)
 	if err != nil {
 		return nil, fmt.Errorf("svn diff failed for partial commit\n\nOutput:\n%s\n\nError: %w", out, err)
 	}
@@ -4491,18 +4329,21 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 		width = 160
 	}
 
-	width = max(80, width)
-	separatorWidth := lipgloss.Width(" │ Δ │ ")
-	leftWidth := max(24, (width-separatorWidth)/2)
-	rightWidth := max(24, width-separatorWidth-leftWidth)
+	leftWidth := max(30, (width-14)/2)
+	rightWidth := leftWidth
+
+	if leftWidth > 90 {
+		leftWidth = 90
+		rightWidth = 90
+	}
 
 	if isLikelyDirectory(r, item.Path) {
-		out, err := svn(r, "diff", "--", item.Path)
+		out, err := svn(r, "diff", item.Path)
 		if err != nil {
 			return "", err
 		}
 
-		return "Directory diff uses unified SVN diff output:\n\n" + colorizeUnifiedDiff(out), nil
+		return "Directory diff uses unified SVN diff output:\n\n" + out, nil
 	}
 
 	var oldText string
@@ -4512,11 +4353,8 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 	if item.Unversioned || strings.HasPrefix(item.Status, "?") || strings.HasPrefix(item.Status, "A") {
 		oldText = ""
 		newText, err = readWorkingFile(r, item.Path)
-		if err != nil && strings.HasPrefix(item.Status, "A") {
-			newText, err = readRepositoryFile(r, item.Path, "HEAD")
-		}
 		if err != nil {
-			return "", fmt.Errorf("new file content could not be read from working copy or repository HEAD: %w", err)
+			return "", err
 		}
 	} else if strings.HasPrefix(item.Status, "D") {
 		oldText, err = readBaseFile(r, item.Path)
@@ -4545,22 +4383,21 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 	b.WriteString("Status: " + item.Status + "\n")
 	if item.Unversioned {
 		b.WriteString("Note: unversioned file, left side is empty. It will be svn add-ed before commit if selected.\n")
-	} else if strings.HasPrefix(item.Status, "A") {
-		b.WriteString("Note: added file, left side is empty and right side shows the new file content.\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(renderDiffHeader(leftWidth, rightWidth))
+	b.WriteString(padRight("OLD / BASE", leftWidth) + " │ Δ │ " + padRight("NEW / WORKING COPY", rightWidth) + "\n")
+	b.WriteString(strings.Repeat("─", leftWidth) + "─┼───┼─" + strings.Repeat("─", rightWidth) + "\n")
 
 	rows := sideBySideRows(oldLines, newLines)
 
 	if len(rows) == 0 {
-		b.WriteString(renderDiffLine("", "", "=", leftWidth, rightWidth) + "\n")
+		b.WriteString(padRight("", leftWidth) + " │ = │ " + padRight("", rightWidth) + "\n")
 		return b.String(), nil
 	}
 
 	for _, row := range rows {
-		leftWrapped := wrapVisualLine(row.Left, leftWidth)
-		rightWrapped := wrapVisualLine(row.Right, rightWidth)
+		leftWrapped := wrapLine(row.Left, leftWidth)
+		rightWrapped := wrapLine(row.Right, rightWidth)
 
 		maxParts := max(len(leftWrapped), len(rightWrapped))
 		for i := 0; i < maxParts; i++ {
@@ -4579,7 +4416,7 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 				marker = " "
 			}
 
-			b.WriteString(renderDiffLine(left, right, marker, leftWidth, rightWidth) + "\n")
+			b.WriteString(padRight(left, leftWidth) + " │ " + marker + " │ " + padRight(right, rightWidth) + "\n")
 		}
 	}
 
@@ -4776,38 +4613,6 @@ func readWorkingFile(r repo, path string) (string, error) {
 	return string(data), nil
 }
 
-func readRepositoryFile(r repo, path string, revision string) (string, error) {
-	if revision == "" {
-		revision = "HEAD"
-	}
-
-	out, err := svn(r, "cat", "-r", revision, "--", repositoryFileURL(r, path))
-	if err != nil {
-		return "", err
-	}
-
-	return out, nil
-}
-
-func repositoryFileURL(r repo, path string) string {
-	base := strings.TrimRight(r.URL, "/")
-	return base + "/" + escapeSVNURLPath(path)
-}
-
-func escapeSVNURLPath(path string) string {
-	path = strings.TrimPrefix(filepath.ToSlash(path), "/")
-	if path == "" {
-		return ""
-	}
-
-	parts := strings.Split(path, "/")
-	for i, part := range parts {
-		parts[i] = url.PathEscape(part)
-	}
-
-	return strings.Join(parts, "/")
-}
-
 func isLikelyDirectory(r repo, path string) bool {
 	fullPath := filepath.Join(r.Path, filepath.FromSlash(path))
 	info, err := os.Stat(fullPath)
@@ -4834,127 +4639,35 @@ func splitLinesForDiff(text string) []string {
 	return lines
 }
 
-func renderDiffHeader(leftWidth int, rightWidth int) string {
-	var b strings.Builder
-	b.WriteString(visiblePadRight("OLD / BASE", leftWidth) + " │ Δ │ " + visiblePadRight("NEW / WORKING COPY", rightWidth) + "\n")
-	b.WriteString(strings.Repeat("─", leftWidth) + "─┼───┼─" + strings.Repeat("─", rightWidth) + "\n")
-	return b.String()
-}
-
-func renderDiffLine(left string, right string, marker string, leftWidth int, rightWidth int) string {
-	left = visiblePadRight(left, leftWidth)
-	right = visiblePadRight(right, rightWidth)
-	marker = strings.TrimSpace(marker)
-	if marker == "" {
-		marker = " "
-	}
-
-	style := diffStyleForMarker(marker)
-	switch marker {
-	case "+":
-		right = style.Render(right)
-	case "-":
-		left = style.Render(left)
-	case "~":
-		left = style.Render(left)
-		right = style.Render(right)
-	case "=":
-		left = diffSameStyle.Render(left)
-		right = diffSameStyle.Render(right)
-	}
-
-	return left + " │ " + style.Render(marker) + " │ " + right
-}
-
-func diffStyleForMarker(marker string) lipgloss.Style {
-	switch marker {
-	case "+":
-		return diffAddedStyle
-	case "-":
-		return diffDeletedStyle
-	case "~":
-		return diffModifiedStyle
-	case "=":
-		return diffSameStyle
-	default:
-		return mutedStyle
-	}
-}
-
-func wrapVisualLine(s string, width int) []string {
+func wrapLine(s string, width int) []string {
 	if width <= 0 {
 		return []string{s}
 	}
 
-	s = expandTabs(s, 4)
 	if s == "" {
 		return []string{""}
 	}
 
+	runes := []rune(s)
 	var parts []string
-	var current strings.Builder
-	currentWidth := 0
 
-	for _, r := range s {
-		rw := lipgloss.Width(string(r))
-		if rw <= 0 {
-			rw = 1
-		}
-
-		if currentWidth > 0 && currentWidth+rw > width {
-			parts = append(parts, current.String())
-			current.Reset()
-			currentWidth = 0
-		}
-
-		current.WriteRune(r)
-		currentWidth += rw
+	for len(runes) > width {
+		parts = append(parts, string(runes[:width]))
+		runes = runes[width:]
 	}
 
-	parts = append(parts, current.String())
+	parts = append(parts, string(runes))
+
 	return parts
 }
 
-func visiblePadRight(s string, width int) string {
-	s = expandTabs(s, 4)
-	for lipgloss.Width(s) > width {
-		runes := []rune(s)
-		if len(runes) == 0 {
-			return strings.Repeat(" ", width)
-		}
-		s = string(runes[:len(runes)-1])
+func padRight(s string, width int) string {
+	runes := []rune(s)
+	if len(runes) >= width {
+		return string(runes[:width])
 	}
 
-	return s + strings.Repeat(" ", max(0, width-lipgloss.Width(s)))
-}
-
-func expandTabs(s string, tabWidth int) string {
-	if tabWidth <= 0 || !strings.Contains(s, "	") {
-		return s
-	}
-
-	var b strings.Builder
-	col := 0
-	for _, r := range s {
-		if r == '	' {
-			spaces := tabWidth - (col % tabWidth)
-			if spaces == 0 {
-				spaces = tabWidth
-			}
-			b.WriteString(strings.Repeat(" ", spaces))
-			col += spaces
-			continue
-		}
-
-		b.WriteRune(r)
-		w := lipgloss.Width(string(r))
-		if w <= 0 {
-			w = 1
-		}
-		col += w
-	}
-
-	return b.String()
+	return s + strings.Repeat(" ", width-len(runes))
 }
 
 var unifiedHunkHeaderRe = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
@@ -5189,15 +4902,67 @@ func selectedCommitItems(items []commitItem) []commitItem {
 	return selected
 }
 
-func selectedCommitPaths(items []commitItem) []string {
+func isMissingVersionedItem(item commitItem) bool {
+	return strings.HasPrefix(strings.TrimSpace(item.Status), "!") && !item.Unversioned && strings.TrimSpace(item.Path) != ""
+}
+
+func selectedMissingVersionedPaths(items []commitItem) []string {
 	var paths []string
-	seen := map[string]bool{}
 
 	for _, item := range items {
-		path := strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(item.Path)), "./")
-		if item.Selected && isSafeSVNWorkingCopyPath(path) && !seen[path] {
-			paths = append(paths, path)
-			seen[path] = true
+		if item.Selected && isMissingVersionedItem(item) {
+			paths = append(paths, item.Path)
+		}
+	}
+
+	return compactSVNPaths(paths)
+}
+
+func compactSVNPaths(paths []string) []string {
+	seen := make(map[string]bool)
+	cleaned := make([]string, 0, len(paths))
+
+	for _, p := range paths {
+		p = strings.TrimSpace(filepath.ToSlash(p))
+		p = strings.TrimPrefix(p, "./")
+		p = strings.Trim(p, "/")
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		cleaned = append(cleaned, p)
+	}
+
+	sort.Slice(cleaned, func(i, j int) bool {
+		if strings.Count(cleaned[i], "/") != strings.Count(cleaned[j], "/") {
+			return strings.Count(cleaned[i], "/") < strings.Count(cleaned[j], "/")
+		}
+		return cleaned[i] < cleaned[j]
+	})
+
+	var compact []string
+	for _, p := range cleaned {
+		skipped := false
+		for _, parent := range compact {
+			if p == parent || strings.HasPrefix(p, parent+"/") {
+				skipped = true
+				break
+			}
+		}
+		if !skipped {
+			compact = append(compact, p)
+		}
+	}
+
+	return compact
+}
+
+func selectedCommitPaths(items []commitItem) []string {
+	var paths []string
+
+	for _, item := range items {
+		if item.Selected {
+			paths = append(paths, item.Path)
 		}
 	}
 
@@ -5236,22 +5001,6 @@ func unversionedItemPaths(items []commitItem) []string {
 	}
 
 	return paths
-}
-
-func cleanSVNPathList(paths []string) []string {
-	cleaned := make([]string, 0, len(paths))
-	seen := map[string]bool{}
-
-	for _, path := range paths {
-		path = strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(path)), "./")
-		if !isSafeSVNWorkingCopyPath(path) || seen[path] {
-			continue
-		}
-		cleaned = append(cleaned, path)
-		seen[path] = true
-	}
-
-	return cleaned
 }
 
 func buildBranchName(r repo, parameter string) (string, error) {
