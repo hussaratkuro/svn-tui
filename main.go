@@ -533,7 +533,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.viewport.Width = max(20, msg.Width)
+		m.viewport.Width = max(20, msg.Width-4)
 		m.viewport.Height = max(5, msg.Height-8)
 		return m, nil
 
@@ -1285,7 +1285,7 @@ func (m model) updatePullSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		item := m.commitItems[m.commitCursor]
 		m.screen = screenRunning
 		m.runningTitle = "Loading incoming diff..."
-		return m, remoteDiffCmd(m.activeRepo, item, m.viewport.Width)
+		return m, remoteDiffCmd(m.activeRepo, item, m.width)
 
 	case "enter":
 		paths := selectedCommitPaths(m.commitItems)
@@ -2249,7 +2249,7 @@ func (m model) viewDiff() string {
 	b.WriteString(repoInfoHeader("Side-by-side diff viewer", m.activeRepo))
 	b.WriteString(mutedStyle.Render("Legend: = same | - removed/old | + added/new | ~ changed") + "\n")
 	b.WriteString(mutedStyle.Render("↑/↓: scroll | PgUp/PgDn: page | Home/End: jump | Esc: back") + "\n\n")
-	b.WriteString(textStyle.Render(m.viewport.View()))
+	b.WriteString(m.viewport.View())
 
 	return b.String()
 }
@@ -2417,27 +2417,30 @@ func parseSVNDiffSummaryLine(line string) (commitItem, bool) {
 }
 
 func parseSVNStatusUpdateLine(line string) (commitItem, bool) {
-	if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "Status against revision") {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "Status against revision") {
 		return commitItem{}, false
 	}
 
-	prefixLen := min(len(line), 9)
+	prefixLen := min(len(line), 24)
 	if !strings.Contains(line[:prefixLen], "*") {
 		return commitItem{}, false
 	}
 
-	fields := strings.Fields(line)
-	if len(fields) == 0 {
+	status, path, ok := parseSVNStatusLine(line)
+	if !ok {
 		return commitItem{}, false
 	}
 
-	path := fields[len(fields)-1]
-	path = strings.TrimPrefix(filepath.ToSlash(path), "./")
-	status := "U"
-	if len(strings.TrimSpace(line)) > 0 {
-		first := strings.TrimSpace(line)[0]
-		if first == 'A' || first == 'D' || first == 'M' || first == 'R' {
-			status = string(first)
+	if strings.TrimSpace(status) == "" {
+		status = "U"
+	}
+
+	fields := strings.Fields(line)
+	if len(fields) > 0 {
+		last := strings.TrimPrefix(filepath.ToSlash(fields[len(fields)-1]), "./")
+		if isSafeSVNWorkingCopyPath(last) {
+			path = last
 		}
 	}
 
@@ -2450,6 +2453,97 @@ func colorizePullStatus(status string) string {
 		status = "U"
 	}
 	return statusStyleForSVNPathAction(status).Render(fmt.Sprintf("%-8s", status))
+}
+
+func parseSVNStatusLine(line string) (string, string, bool) {
+	if isSVNStatusNoiseLine(line) || len(line) < 8 {
+		return "", "", false
+	}
+
+	statusArea := line[:8]
+	if strings.TrimSpace(statusArea) == ">" || !isValidSVNStatusArea(statusArea) {
+		return "", "", false
+	}
+
+	path := strings.TrimSpace(line[8:])
+	path = strings.TrimPrefix(filepath.ToSlash(path), "./")
+	if !isSafeSVNWorkingCopyPath(path) {
+		return "", "", false
+	}
+
+	return strings.TrimSpace(statusArea), path, true
+}
+
+func isValidSVNStatusArea(statusArea string) bool {
+	if len(statusArea) == 0 {
+		return false
+	}
+
+	hasStatus := false
+	allowed := "ACDMR?!~IXL+SKOC"
+	for _, r := range statusArea {
+		if r == ' ' || r == '\t' {
+			continue
+		}
+		if !strings.ContainsRune(allowed, r) {
+			return false
+		}
+		hasStatus = true
+	}
+
+	return hasStatus
+}
+
+func isSVNStatusNoiseLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return true
+	}
+
+	lower := strings.ToLower(trimmed)
+	noisePrefixes := []string{
+		">",
+		"summary of conflicts:",
+		"text conflicts:",
+		"property conflicts:",
+		"tree conflicts:",
+		"local ",
+		"incoming ",
+		"of conflicts:",
+		"conflicts:",
+	}
+	for _, prefix := range noisePrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isSafeSVNWorkingCopyPath(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" || path == "." || path == ".." || strings.HasPrefix(path, "-") {
+		return false
+	}
+
+	lower := strings.ToLower(path)
+	noiseFragments := []string{
+		"local dir edit",
+		"incoming dir delete",
+		"incoming file delete",
+		"summary of conflicts",
+		"tree conflicts:",
+		"text conflicts:",
+		"property conflicts:",
+	}
+	for _, fragment := range noiseFragments {
+		if strings.Contains(lower, fragment) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func loadCommitItemsCmd(r repo) tea.Cmd {
@@ -2493,21 +2587,8 @@ func loadCommitItems(r repo, includeUnversioned bool) ([]commitItem, error) {
 			continue
 		}
 
-		status := ""
-		path := ""
-
-		if len(line) >= 8 {
-			status = strings.TrimSpace(line[:8])
-			path = strings.TrimSpace(line[8:])
-		} else {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				status = fields[0]
-				path = fields[len(fields)-1]
-			}
-		}
-
-		if status == "" || path == "" {
+		status, path, ok := parseSVNStatusLine(line)
+		if !ok {
 			continue
 		}
 
@@ -2565,21 +2646,8 @@ func loadConflictItems(r repo) ([]conflictItem, error) {
 			continue
 		}
 
-		status := ""
-		path := ""
-
-		if len(line) >= 8 {
-			status = strings.TrimSpace(line[:8])
-			path = strings.TrimSpace(line[8:])
-		} else {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				status = fields[0]
-				path = fields[len(fields)-1]
-			}
-		}
-
-		if status == "" || path == "" {
+		status, path, ok := parseSVNStatusLine(line)
+		if !ok {
 			continue
 		}
 
@@ -2769,45 +2837,48 @@ func pullCmd(r repo, paths []string) tea.Cmd {
 			output.WriteString("Auth password: NOT SET\n")
 		}
 
-		args := []string{"update"}
-		args = append(args, paths...)
-
-		output.WriteString("Selected files:\n")
-		for _, path := range paths {
-			output.WriteString("  " + path + "\n")
-		}
-
-		output.WriteString("\nPre-cleanup: svn cleanup\n\n")
-		cleanupOut, cleanupErr := svnCleanup(r)
-		if strings.TrimSpace(cleanupOut) != "" {
-			output.WriteString(colorizeSVNCleanupOutput(cleanupOut) + "\n")
-		}
-		if cleanupErr != nil {
-			output.WriteString("\nPre-cleanup failed. Pull was not started.\n")
+		cleanedPaths := cleanSVNPathList(paths)
+		if len(cleanedPaths) == 0 {
 			return commandResult{
-				Output:          output.String(),
-				Err:             cleanupErr,
+				Output:          output.String() + "\nNo valid SVN paths were selected for pull.",
+				Err:             fmt.Errorf("no valid SVN paths selected"),
 				CurrentLocation: getCurrentLocation(r),
 			}
 		}
 
+		output.WriteString("\nRunning cleanup before pull...\n\n")
+		cleanupOut, cleanupErr := svn(r, "cleanup")
+		output.WriteString(cleanupOut)
+		if cleanupErr != nil {
+			return commandResult{
+				Output:          output.String(),
+				Err:             fmt.Errorf("svn cleanup before pull failed: %w", cleanupErr),
+				CurrentLocation: getCurrentLocation(r),
+			}
+		}
+
+		args := []string{"update", "--"}
+		args = append(args, cleanedPaths...)
+
+		output.WriteString("Selected files:\n")
+		for _, path := range cleanedPaths {
+			output.WriteString("  " + path + "\n")
+		}
 		output.WriteString("\nRunning: svn " + strings.Join(args, " ") + "\n\n")
 
 		out, err := svn(r, args...)
 		output.WriteString(colorizeSVNUpdateOutput(out))
 
 		if err != nil {
-			output.WriteString("\n\nUpdate failed or was interrupted. Running safety cleanup: svn cleanup\n\n")
-			cleanupOut, cleanupErr := svnCleanup(r)
-			if strings.TrimSpace(cleanupOut) != "" {
-				output.WriteString(colorizeSVNCleanupOutput(cleanupOut) + "\n")
-			}
+			output.WriteString("\n\nUpdate failed or was interrupted. Running cleanup after failed pull...\n\n")
+			cleanupOut, cleanupErr = svn(r, "cleanup")
+			output.WriteString(cleanupOut)
 			if cleanupErr != nil {
-				err = fmt.Errorf("%w\ncleanup after failed pull also failed: %v", err, cleanupErr)
-			} else {
-				output.WriteString("Cleanup finished. Working-copy locks should be cleared.\n")
+				err = fmt.Errorf("svn update failed: %w; cleanup after failure also failed: %v", err, cleanupErr)
 			}
-		} else {
+		}
+
+		if err == nil {
 			output.WriteString("\nPull finished successfully.")
 		}
 
@@ -2948,7 +3019,7 @@ func diffCmd(r repo, item commitItem, width int) tea.Cmd {
 		if err != nil {
 			fallbackOut, fallbackErr := svn(r, "diff", item.Path)
 			if fallbackOut != "" {
-				out += "\n\nUnified svn diff fallback:\n\n" + colorizeUnifiedDiff(fallbackOut)
+				out += "\n\nUnified svn diff fallback:\n\n" + fallbackOut
 			}
 
 			if fallbackErr != nil {
@@ -3010,6 +3081,8 @@ func revertCmd(r repo, paths []string) tea.Cmd {
 	return func() tea.Msg {
 		var output strings.Builder
 
+		paths = cleanSVNPathList(paths)
+
 		output.WriteString("Working copy: " + r.Path + "\n")
 		output.WriteString("Selected files to revert:\n")
 
@@ -3019,7 +3092,15 @@ func revertCmd(r repo, paths []string) tea.Cmd {
 
 		output.WriteString("\nRunning revert...\n\n")
 
-		args := []string{"revert"}
+		if len(paths) == 0 {
+			return commandResult{
+				Output:          output.String() + "\nNo valid SVN paths were selected for revert.",
+				Err:             fmt.Errorf("no valid SVN paths selected"),
+				CurrentLocation: getCurrentLocation(r),
+			}
+		}
+
+		args := []string{"revert", "--"}
 		args = append(args, paths...)
 
 		out, err := svn(r, args...)
@@ -3377,18 +3458,6 @@ func colorizeSVNLogMetaLine(line string) string {
 	}
 
 	return b.String()
-}
-
-func colorizeSVNCleanupOutput(out string) string {
-	var b strings.Builder
-	for _, line := range strings.Split(out, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		b.WriteString(successStyle.Render(trimmed) + "\n")
-	}
-	return strings.TrimRight(b.String(), "\n")
 }
 
 func colorizeSVNUpdateOutput(out string) string {
@@ -4309,13 +4378,10 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 		width = 160
 	}
 
-	// Use the whole visible terminal width. The table has 7 fixed separator runes:
-	// " │ Δ │ ". Keep both sides readable on small terminals, but do not cap wide
-	// terminals to 90 columns anymore.
-	tableWidth := max(80, width)
-	available := max(60, tableWidth-7)
-	leftWidth := max(24, available/2)
-	rightWidth := max(24, available-leftWidth)
+	width = max(80, width)
+	separatorWidth := lipgloss.Width(" │ Δ │ ")
+	leftWidth := max(24, (width-separatorWidth)/2)
+	rightWidth := max(24, width-separatorWidth-leftWidth)
 
 	if isLikelyDirectory(r, item.Path) {
 		out, err := svn(r, "diff", item.Path)
@@ -4354,8 +4420,8 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 		}
 	}
 
-	oldLines := normalizeLinesForSideBySideDiff(splitLinesForDiff(oldText))
-	newLines := normalizeLinesForSideBySideDiff(splitLinesForDiff(newText))
+	oldLines := splitLinesForDiff(oldText)
+	newLines := splitLinesForDiff(newText)
 
 	var b strings.Builder
 
@@ -4365,19 +4431,18 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 		b.WriteString("Note: unversioned file, left side is empty. It will be svn add-ed before commit if selected.\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(labelMauveStyle.Render(padRight("OLD / BASE", leftWidth)) + mutedStyle.Render(" │ Δ │ ") + labelMauveStyle.Render(padRight("NEW / WORKING COPY", rightWidth)) + "\n")
-	b.WriteString(mutedStyle.Render(strings.Repeat("─", leftWidth)+"─┼───┼─"+strings.Repeat("─", rightWidth)) + "\n")
+	b.WriteString(renderDiffHeader(leftWidth, rightWidth))
 
 	rows := sideBySideRows(oldLines, newLines)
 
 	if len(rows) == 0 {
-		b.WriteString(renderSideBySideDiffLine("", "", "=", leftWidth, rightWidth) + "\n")
+		b.WriteString(renderDiffLine("", "", "=", leftWidth, rightWidth) + "\n")
 		return b.String(), nil
 	}
 
 	for _, row := range rows {
-		leftWrapped := wrapLine(row.Left, leftWidth)
-		rightWrapped := wrapLine(row.Right, rightWidth)
+		leftWrapped := wrapVisualLine(row.Left, leftWidth)
+		rightWrapped := wrapVisualLine(row.Right, rightWidth)
 
 		maxParts := max(len(leftWrapped), len(rightWrapped))
 		for i := 0; i < maxParts; i++ {
@@ -4396,33 +4461,11 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 				marker = " "
 			}
 
-			b.WriteString(renderSideBySideDiffLine(left, right, marker, leftWidth, rightWidth) + "\n")
+			b.WriteString(renderDiffLine(left, right, marker, leftWidth, rightWidth) + "\n")
 		}
 	}
 
 	return b.String(), nil
-}
-
-func renderSideBySideDiffLine(left string, right string, marker string, leftWidth int, rightWidth int) string {
-	leftCell := padRight(left, leftWidth)
-	rightCell := padRight(right, rightWidth)
-	markerCell := marker
-	if strings.TrimSpace(markerCell) == "" {
-		markerCell = " "
-	}
-
-	switch marker {
-	case "+":
-		return diffSameStyle.Render(leftCell) + mutedStyle.Render(" │ ") + diffAddedStyle.Render(markerCell) + mutedStyle.Render(" │ ") + diffAddedStyle.Render(rightCell)
-	case "-":
-		return diffDeletedStyle.Render(leftCell) + mutedStyle.Render(" │ ") + diffDeletedStyle.Render(markerCell) + mutedStyle.Render(" │ ") + diffSameStyle.Render(rightCell)
-	case "~":
-		return diffDeletedStyle.Render(leftCell) + mutedStyle.Render(" │ ") + diffModifiedStyle.Render(markerCell) + mutedStyle.Render(" │ ") + diffAddedStyle.Render(rightCell)
-	case "=":
-		return diffSameStyle.Render(leftCell) + mutedStyle.Render(" │ ") + diffSameStyle.Render(markerCell) + mutedStyle.Render(" │ ") + diffSameStyle.Render(rightCell)
-	default:
-		return mutedStyle.Render(leftCell) + mutedStyle.Render(" │ ") + mutedStyle.Render(markerCell) + mutedStyle.Render(" │ ") + mutedStyle.Render(rightCell)
-	}
 }
 
 type diffRow struct {
@@ -4641,34 +4684,112 @@ func splitLinesForDiff(text string) []string {
 	return lines
 }
 
-func normalizeLinesForSideBySideDiff(lines []string) []string {
-	if len(lines) == 0 {
-		return lines
-	}
-
-	normalized := make([]string, len(lines))
-	for i, line := range lines {
-		// Raw tab characters make side-by-side columns drift because terminals
-		// expand them visually after padding has already been calculated. Convert
-		// them before wrapping/padding so every cell has a predictable width.
-		normalized[i] = expandTabs(line, 4)
-	}
-
-	return normalized
+func renderDiffHeader(leftWidth int, rightWidth int) string {
+	var b strings.Builder
+	b.WriteString(visiblePadRight("OLD / BASE", leftWidth) + " │ Δ │ " + visiblePadRight("NEW / WORKING COPY", rightWidth) + "\n")
+	b.WriteString(strings.Repeat("─", leftWidth) + "─┼───┼─" + strings.Repeat("─", rightWidth) + "\n")
+	return b.String()
 }
 
-func expandTabs(s string, tabSize int) string {
-	if tabSize <= 0 || !strings.ContainsRune(s, '\t') {
+func renderDiffLine(left string, right string, marker string, leftWidth int, rightWidth int) string {
+	left = visiblePadRight(left, leftWidth)
+	right = visiblePadRight(right, rightWidth)
+	marker = strings.TrimSpace(marker)
+	if marker == "" {
+		marker = " "
+	}
+
+	style := diffStyleForMarker(marker)
+	switch marker {
+	case "+":
+		right = style.Render(right)
+	case "-":
+		left = style.Render(left)
+	case "~":
+		left = style.Render(left)
+		right = style.Render(right)
+	case "=":
+		left = diffSameStyle.Render(left)
+		right = diffSameStyle.Render(right)
+	}
+
+	return left + " │ " + style.Render(marker) + " │ " + right
+}
+
+func diffStyleForMarker(marker string) lipgloss.Style {
+	switch marker {
+	case "+":
+		return diffAddedStyle
+	case "-":
+		return diffDeletedStyle
+	case "~":
+		return diffModifiedStyle
+	case "=":
+		return diffSameStyle
+	default:
+		return mutedStyle
+	}
+}
+
+func wrapVisualLine(s string, width int) []string {
+	if width <= 0 {
+		return []string{s}
+	}
+
+	s = expandTabs(s, 4)
+	if s == "" {
+		return []string{""}
+	}
+
+	var parts []string
+	var current strings.Builder
+	currentWidth := 0
+
+	for _, r := range s {
+		rw := lipgloss.Width(string(r))
+		if rw <= 0 {
+			rw = 1
+		}
+
+		if currentWidth > 0 && currentWidth+rw > width {
+			parts = append(parts, current.String())
+			current.Reset()
+			currentWidth = 0
+		}
+
+		current.WriteRune(r)
+		currentWidth += rw
+	}
+
+	parts = append(parts, current.String())
+	return parts
+}
+
+func visiblePadRight(s string, width int) string {
+	s = expandTabs(s, 4)
+	for lipgloss.Width(s) > width {
+		runes := []rune(s)
+		if len(runes) == 0 {
+			return strings.Repeat(" ", width)
+		}
+		s = string(runes[:len(runes)-1])
+	}
+
+	return s + strings.Repeat(" ", max(0, width-lipgloss.Width(s)))
+}
+
+func expandTabs(s string, tabWidth int) string {
+	if tabWidth <= 0 || !strings.Contains(s, "	") {
 		return s
 	}
 
 	var b strings.Builder
 	col := 0
 	for _, r := range s {
-		if r == '\t' {
-			spaces := tabSize - (col % tabSize)
+		if r == '	' {
+			spaces := tabWidth - (col % tabWidth)
 			if spaces == 0 {
-				spaces = tabSize
+				spaces = tabWidth
 			}
 			b.WriteString(strings.Repeat(" ", spaces))
 			col += spaces
@@ -4676,83 +4797,14 @@ func expandTabs(s string, tabSize int) string {
 		}
 
 		b.WriteRune(r)
-		col++
+		w := lipgloss.Width(string(r))
+		if w <= 0 {
+			w = 1
+		}
+		col += w
 	}
 
 	return b.String()
-}
-
-func wrapLine(s string, width int) []string {
-	if width <= 0 {
-		return []string{s}
-	}
-
-	if s == "" {
-		return []string{""}
-	}
-
-	var parts []string
-	var b strings.Builder
-	currentWidth := 0
-
-	for _, r := range s {
-		runeText := string(r)
-		runeWidth := lipgloss.Width(runeText)
-		if runeWidth <= 0 {
-			runeWidth = 1
-		}
-
-		if currentWidth > 0 && currentWidth+runeWidth > width {
-			parts = append(parts, b.String())
-			b.Reset()
-			currentWidth = 0
-		}
-
-		b.WriteRune(r)
-		currentWidth += runeWidth
-	}
-
-	parts = append(parts, b.String())
-	return parts
-}
-
-func padRight(s string, width int) string {
-	currentWidth := lipgloss.Width(s)
-	if currentWidth == width {
-		return s
-	}
-
-	if currentWidth > width {
-		return truncateVisualWidth(s, width)
-	}
-
-	return s + strings.Repeat(" ", width-currentWidth)
-}
-
-func truncateVisualWidth(s string, width int) string {
-	if width <= 0 || s == "" {
-		return ""
-	}
-
-	var b strings.Builder
-	currentWidth := 0
-
-	for _, r := range s {
-		runeText := string(r)
-		runeWidth := lipgloss.Width(runeText)
-		if runeWidth <= 0 {
-			runeWidth = 1
-		}
-
-		if currentWidth+runeWidth > width {
-			break
-		}
-
-		b.WriteRune(r)
-		currentWidth += runeWidth
-	}
-
-	return b.String() + strings.Repeat(" ", max(0, width-currentWidth))
 }
 
 var unifiedHunkHeaderRe = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
@@ -4989,10 +5041,13 @@ func selectedCommitItems(items []commitItem) []commitItem {
 
 func selectedCommitPaths(items []commitItem) []string {
 	var paths []string
+	seen := map[string]bool{}
 
 	for _, item := range items {
-		if item.Selected {
-			paths = append(paths, item.Path)
+		path := strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(item.Path)), "./")
+		if item.Selected && isSafeSVNWorkingCopyPath(path) && !seen[path] {
+			paths = append(paths, path)
+			seen[path] = true
 		}
 	}
 
@@ -5031,6 +5086,22 @@ func unversionedItemPaths(items []commitItem) []string {
 	}
 
 	return paths
+}
+
+func cleanSVNPathList(paths []string) []string {
+	cleaned := make([]string, 0, len(paths))
+	seen := map[string]bool{}
+
+	for _, path := range paths {
+		path = strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(path)), "./")
+		if !isSafeSVNWorkingCopyPath(path) || seen[path] {
+			continue
+		}
+		cleaned = append(cleaned, path)
+		seen[path] = true
+	}
+
+	return cleaned
 }
 
 func buildBranchName(r repo, parameter string) (string, error) {
@@ -5116,10 +5187,6 @@ func svn(r repo, args ...string) (string, error) {
 	out, err := cmd.CombinedOutput()
 
 	return string(out), err
-}
-
-func svnCleanup(r repo) (string, error) {
-	return svn(r, "cleanup")
 }
 
 func svnInteractive(r repo, args ...string) (string, error) {
