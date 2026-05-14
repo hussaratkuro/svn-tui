@@ -1359,24 +1359,6 @@ func (m model) updateCommitSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.runningTitle = "Loading side-by-side diff..."
 		return m, diffCmd(m.activeRepo, item, m.width)
 
-	case "r":
-		paths := selectedMissingVersionedPaths(m.commitItems)
-		if len(paths) == 0 && len(m.commitItems) > 0 && isMissingVersionedItem(m.commitItems[m.commitCursor]) {
-			paths = []string{m.commitItems[m.commitCursor].Path}
-		}
-
-		if len(paths) == 0 {
-			m.screen = screenResult
-			m.err = fmt.Errorf("no missing versioned paths selected")
-			m.result = "Select at least one ! path with Space, or move the cursor to a ! path, then press r."
-			m.viewport.SetContent(m.result + "\n\n" + m.err.Error())
-			return m, nil
-		}
-
-		m.screen = screenRunning
-		m.runningTitle = "Marking missing paths as deleted..."
-		return m, deleteMissingPathsCmd(m.activeRepo, paths)
-
 	case "p":
 		if len(m.commitItems) == 0 {
 			return m, nil
@@ -1964,7 +1946,7 @@ func (m model) viewCommitSelect() string {
 
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render(scrollHint(m.commitOffset, end, len(m.commitItems))) + "\n")
-	b.WriteString(mutedStyle.Render("Space: select | a: all | n: none | d: diff | p: partial hunks | r: svn delete --force selected ! | Enter: commit message | Esc: back"))
+	b.WriteString(mutedStyle.Render("Space: select | a: all | n: none | d: diff | p: partial hunks | Enter: commit message | Esc: back"))
 
 	return b.String()
 }
@@ -2267,7 +2249,10 @@ func (m model) viewDiff() string {
 	b.WriteString(repoInfoHeader("Side-by-side diff viewer", m.activeRepo))
 	b.WriteString(mutedStyle.Render("Legend: = same | - removed/old | + added/new | ~ changed") + "\n")
 	b.WriteString(mutedStyle.Render("↑/↓: scroll | PgUp/PgDn: page | Home/End: jump | Esc: back") + "\n\n")
-	b.WriteString(textStyle.Render(m.viewport.View()))
+	// Do not wrap the diff viewport in textStyle.Render. The diff body already
+	// contains ANSI styling, and applying a parent foreground can flatten or
+	// override the per-line colors in some terminals.
+	b.WriteString(m.viewport.View())
 
 	return b.String()
 }
@@ -2873,46 +2858,6 @@ func checkoutRevisionCmd(r repo, revision string) tea.Cmd {
 	}
 }
 
-func deleteMissingPathsCmd(r repo, paths []string) tea.Cmd {
-	return func() tea.Msg {
-		paths = compactSVNPaths(paths)
-		var output strings.Builder
-
-		output.WriteString("Working copy: " + r.Path + "\n")
-		output.WriteString("Selected ! paths to mark as deleted with svn delete --force:\n")
-		for _, p := range paths {
-			output.WriteString("  " + p + "\n")
-		}
-
-		if len(paths) == 0 {
-			return commandResult{
-				Output:          output.String() + "\nNo usable ! paths were selected.",
-				Err:             fmt.Errorf("no missing versioned paths selected"),
-				CurrentLocation: getCurrentLocation(r),
-			}
-		}
-
-		output.WriteString("\nRunning: svn delete --force -- <paths...>\n\n")
-
-		args := []string{"delete", "--force", "--"}
-		args = append(args, paths...)
-
-		out, err := svn(r, args...)
-		output.WriteString(out)
-
-		if err == nil {
-			output.WriteString("\nMissing paths were marked as deleted.")
-			output.WriteString("\nGo back to Commit, review the D entries, then commit them.")
-		}
-
-		return commandResult{
-			Output:          output.String(),
-			Err:             err,
-			CurrentLocation: getCurrentLocation(r),
-		}
-	}
-}
-
 func commitCmd(r repo, items []commitItem, message string) tea.Cmd {
 	return func() tea.Msg {
 		var output strings.Builder
@@ -2978,9 +2923,9 @@ func diffCmd(r repo, item commitItem, width int) tea.Cmd {
 		out, err := buildSideBySideDiff(r, item, width)
 
 		if err != nil {
-			fallbackOut, fallbackErr := svn(r, "diff", item.Path)
+			fallbackOut, fallbackErr := svn(r, "diff", "--", item.Path)
 			if fallbackOut != "" {
-				out += "\n\nUnified svn diff fallback:\n\n" + fallbackOut
+				out += "\n\nUnified svn diff fallback:\n\n" + colorizeUnifiedDiff(fallbackOut)
 			}
 
 			if fallbackErr != nil {
@@ -4329,21 +4274,31 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 		width = 160
 	}
 
-	leftWidth := max(30, (width-14)/2)
-	rightWidth := leftWidth
+	// The separator is rendered literally between the two fixed-width cells.
+	// Keep all width math visual-width based, otherwise tabs, ANSI codes and
+	// wider Unicode glyphs will push the │ Δ │ column out of alignment.
+	separatorWidth := lipgloss.Width(" │ Δ │ ")
+	available := width - separatorWidth
+	if available < 60 {
+		available = 60
+	}
 
-	if leftWidth > 90 {
-		leftWidth = 90
-		rightWidth = 90
+	leftWidth := available / 2
+	rightWidth := available - leftWidth
+	if leftWidth < 24 {
+		leftWidth = 24
+	}
+	if rightWidth < 24 {
+		rightWidth = 24
 	}
 
 	if isLikelyDirectory(r, item.Path) {
-		out, err := svn(r, "diff", item.Path)
+		out, err := svn(r, "diff", "--", item.Path)
 		if err != nil {
 			return "", err
 		}
 
-		return "Directory diff uses unified SVN diff output:\n\n" + out, nil
+		return "Directory diff uses unified SVN diff output:\n\n" + colorizeUnifiedDiff(out), nil
 	}
 
 	var oldText string
@@ -4354,9 +4309,12 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 		oldText = ""
 		newText, err = readWorkingFile(r, item.Path)
 		if err != nil {
-			return "", err
+			newText, err = readHeadFile(r, item.Path)
+			if err != nil {
+				return "", err
+			}
 		}
-	} else if strings.HasPrefix(item.Status, "D") {
+	} else if strings.HasPrefix(item.Status, "D") || strings.HasPrefix(item.Status, "!") {
 		oldText, err = readBaseFile(r, item.Path)
 		if err != nil {
 			return "", err
@@ -4383,21 +4341,24 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 	b.WriteString("Status: " + item.Status + "\n")
 	if item.Unversioned {
 		b.WriteString("Note: unversioned file, left side is empty. It will be svn add-ed before commit if selected.\n")
+	} else if strings.HasPrefix(item.Status, "A") {
+		b.WriteString("Note: added file, left side is empty and right side shows the new file content.\n")
+	} else if strings.HasPrefix(item.Status, "!") {
+		b.WriteString("Note: missing path, right side is empty. Use r in the commit screen if you want to svn delete --force it.\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(padRight("OLD / BASE", leftWidth) + " │ Δ │ " + padRight("NEW / WORKING COPY", rightWidth) + "\n")
-	b.WriteString(strings.Repeat("─", leftWidth) + "─┼───┼─" + strings.Repeat("─", rightWidth) + "\n")
+	b.WriteString(renderDiffHeader(leftWidth, rightWidth))
 
-	rows := sideBySideRows(oldLines, newLines)
+	rows := compactUnchangedRows(sideBySideRows(oldLines, newLines), 3)
 
 	if len(rows) == 0 {
-		b.WriteString(padRight("", leftWidth) + " │ = │ " + padRight("", rightWidth) + "\n")
+		b.WriteString(renderSideBySideDiffLine("", "", "=", leftWidth, rightWidth) + "\n")
 		return b.String(), nil
 	}
 
 	for _, row := range rows {
-		leftWrapped := wrapLine(row.Left, leftWidth)
-		rightWrapped := wrapLine(row.Right, rightWidth)
+		leftWrapped := wrapVisualLine(row.Left, leftWidth)
+		rightWrapped := wrapVisualLine(row.Right, rightWidth)
 
 		maxParts := max(len(leftWrapped), len(rightWrapped))
 		for i := 0; i < maxParts; i++ {
@@ -4416,11 +4377,38 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 				marker = " "
 			}
 
-			b.WriteString(padRight(left, leftWidth) + " │ " + marker + " │ " + padRight(right, rightWidth) + "\n")
+			b.WriteString(renderSideBySideDiffLine(left, right, marker, leftWidth, rightWidth) + "\n")
 		}
 	}
 
 	return b.String(), nil
+}
+
+func renderDiffHeader(leftWidth int, rightWidth int) string {
+	leftHeader := padRightVisual("OLD / BASE", leftWidth)
+	rightHeader := padRightVisual("NEW / WORKING COPY", rightWidth)
+	line := strings.Repeat("─", leftWidth) + "─┼───┼─" + strings.Repeat("─", rightWidth)
+
+	return labelMauveStyle.Render(leftHeader) + mutedStyle.Render(" │ Δ │ ") + labelMauveStyle.Render(rightHeader) + "\n" + mutedStyle.Render(line) + "\n"
+}
+
+func renderSideBySideDiffLine(left string, right string, marker string, leftWidth int, rightWidth int) string {
+	leftCell := padRightVisual(left, leftWidth)
+	rightCell := padRightVisual(right, rightWidth)
+	markerCell := padRightVisual(marker, 1)
+
+	switch marker {
+	case "+":
+		return diffSameStyle.Render(leftCell) + mutedStyle.Render(" │ ") + diffAddedStyle.Render(markerCell) + mutedStyle.Render(" │ ") + diffAddedStyle.Render(rightCell)
+	case "-":
+		return diffDeletedStyle.Render(leftCell) + mutedStyle.Render(" │ ") + diffDeletedStyle.Render(markerCell) + mutedStyle.Render(" │ ") + diffSameStyle.Render(rightCell)
+	case "~":
+		return diffDeletedStyle.Render(leftCell) + mutedStyle.Render(" │ ") + diffModifiedStyle.Render(markerCell) + mutedStyle.Render(" │ ") + diffAddedStyle.Render(rightCell)
+	case " ":
+		return diffSameStyle.Render(leftCell) + mutedStyle.Render(" │ ") + mutedStyle.Render(markerCell) + mutedStyle.Render(" │ ") + diffSameStyle.Render(rightCell)
+	default:
+		return diffSameStyle.Render(leftCell) + mutedStyle.Render(" │ ") + diffSameStyle.Render(markerCell) + mutedStyle.Render(" │ ") + diffSameStyle.Render(rightCell)
+	}
 }
 
 type diffRow struct {
@@ -4613,6 +4601,15 @@ func readWorkingFile(r repo, path string) (string, error) {
 	return string(data), nil
 }
 
+func readHeadFile(r repo, path string) (string, error) {
+	out, err := svn(r, "cat", "-r", "HEAD", "--", path)
+	if err != nil {
+		return "", err
+	}
+
+	return out, nil
+}
+
 func isLikelyDirectory(r repo, path string) bool {
 	fullPath := filepath.Join(r.Path, filepath.FromSlash(path))
 	info, err := os.Stat(fullPath)
@@ -4640,34 +4637,103 @@ func splitLinesForDiff(text string) []string {
 }
 
 func wrapLine(s string, width int) []string {
+	return wrapVisualLine(s, width)
+}
+
+func wrapVisualLine(s string, width int) []string {
 	if width <= 0 {
 		return []string{s}
 	}
 
+	s = expandTabsForDiff(s, 4)
 	if s == "" {
 		return []string{""}
 	}
 
-	runes := []rune(s)
 	var parts []string
+	var current strings.Builder
+	currentWidth := 0
 
-	for len(runes) > width {
-		parts = append(parts, string(runes[:width]))
-		runes = runes[width:]
+	for _, r := range s {
+		chunk := string(r)
+		chunkWidth := lipgloss.Width(chunk)
+		if chunkWidth <= 0 {
+			chunkWidth = 1
+		}
+
+		if currentWidth > 0 && currentWidth+chunkWidth > width {
+			parts = append(parts, current.String())
+			current.Reset()
+			currentWidth = 0
+		}
+
+		current.WriteString(chunk)
+		currentWidth += chunkWidth
 	}
 
-	parts = append(parts, string(runes))
-
+	parts = append(parts, current.String())
 	return parts
 }
 
 func padRight(s string, width int) string {
-	runes := []rune(s)
-	if len(runes) >= width {
-		return string(runes[:width])
+	return padRightVisual(s, width)
+}
+
+func padRightVisual(s string, width int) string {
+	s = expandTabsForDiff(s, 4)
+	currentWidth := lipgloss.Width(s)
+	if currentWidth == width {
+		return s
+	}
+	if currentWidth < width {
+		return s + strings.Repeat(" ", width-currentWidth)
 	}
 
-	return s + strings.Repeat(" ", width-len(runes))
+	var b strings.Builder
+	used := 0
+	for _, r := range s {
+		chunk := string(r)
+		chunkWidth := lipgloss.Width(chunk)
+		if chunkWidth <= 0 {
+			chunkWidth = 1
+		}
+		if used+chunkWidth > width {
+			break
+		}
+		b.WriteString(chunk)
+		used += chunkWidth
+	}
+
+	if used < width {
+		b.WriteString(strings.Repeat(" ", width-used))
+	}
+
+	return b.String()
+}
+
+func expandTabsForDiff(s string, tabSize int) string {
+	if tabSize <= 0 || !strings.ContainsRune(s, '\t') {
+		return s
+	}
+
+	var b strings.Builder
+	col := 0
+	for _, r := range s {
+		if r == '\t' {
+			spaces := tabSize - (col % tabSize)
+			b.WriteString(strings.Repeat(" ", spaces))
+			col += spaces
+			continue
+		}
+		b.WriteRune(r)
+		w := lipgloss.Width(string(r))
+		if w <= 0 {
+			w = 1
+		}
+		col += w
+	}
+
+	return b.String()
 }
 
 var unifiedHunkHeaderRe = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
@@ -4900,61 +4966,6 @@ func selectedCommitItems(items []commitItem) []commitItem {
 	}
 
 	return selected
-}
-
-func isMissingVersionedItem(item commitItem) bool {
-	return strings.HasPrefix(strings.TrimSpace(item.Status), "!") && !item.Unversioned && strings.TrimSpace(item.Path) != ""
-}
-
-func selectedMissingVersionedPaths(items []commitItem) []string {
-	var paths []string
-
-	for _, item := range items {
-		if item.Selected && isMissingVersionedItem(item) {
-			paths = append(paths, item.Path)
-		}
-	}
-
-	return compactSVNPaths(paths)
-}
-
-func compactSVNPaths(paths []string) []string {
-	seen := make(map[string]bool)
-	cleaned := make([]string, 0, len(paths))
-
-	for _, p := range paths {
-		p = strings.TrimSpace(filepath.ToSlash(p))
-		p = strings.TrimPrefix(p, "./")
-		p = strings.Trim(p, "/")
-		if p == "" || seen[p] {
-			continue
-		}
-		seen[p] = true
-		cleaned = append(cleaned, p)
-	}
-
-	sort.Slice(cleaned, func(i, j int) bool {
-		if strings.Count(cleaned[i], "/") != strings.Count(cleaned[j], "/") {
-			return strings.Count(cleaned[i], "/") < strings.Count(cleaned[j], "/")
-		}
-		return cleaned[i] < cleaned[j]
-	})
-
-	var compact []string
-	for _, p := range cleaned {
-		skipped := false
-		for _, parent := range compact {
-			if p == parent || strings.HasPrefix(p, parent+"/") {
-				skipped = true
-				break
-			}
-		}
-		if !skipped {
-			compact = append(compact, p)
-		}
-	}
-
-	return compact
 }
 
 func selectedCommitPaths(items []commitItem) []string {
