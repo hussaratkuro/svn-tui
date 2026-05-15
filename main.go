@@ -893,30 +893,11 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) updateRepoSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	visible := m.visibleListCount(7)
+	key := msg.String()
 
-	switch msg.String() {
-	case "up", "k":
-		if m.repoCursor > 0 {
-			m.repoCursor--
-		}
+	m.repoCursor = navigateCursor(m.repoCursor, len(m.repos), visible, key)
 
-	case "down", "j":
-		if m.repoCursor < len(m.repos)-1 {
-			m.repoCursor++
-		}
-
-	case "pgup":
-		m.repoCursor = max(0, m.repoCursor-visible)
-
-	case "pgdown":
-		m.repoCursor = min(len(m.repos)-1, m.repoCursor+visible)
-
-	case "home":
-		m.repoCursor = 0
-
-	case "end":
-		m.repoCursor = len(m.repos) - 1
-
+	switch key {
 	case "enter":
 		m.activeRepo = m.repos[m.repoCursor]
 		m.activeRepo.CurrentLocation = getCurrentLocation(m.activeRepo)
@@ -933,31 +914,12 @@ func (m model) updateRepoSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateActionSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	visible := m.visibleListCount(8)
+	visible := m.visibleListCount(10)
+	key := msg.String()
 
-	switch msg.String() {
-	case "up", "k":
-		if m.actionCursor > 0 {
-			m.actionCursor--
-		}
+	m.actionCursor = navigateCursor(m.actionCursor, len(m.actions), visible, key)
 
-	case "down", "j":
-		if m.actionCursor < len(m.actions)-1 {
-			m.actionCursor++
-		}
-
-	case "pgup":
-		m.actionCursor = max(0, m.actionCursor-visible)
-
-	case "pgdown":
-		m.actionCursor = min(len(m.actions)-1, m.actionCursor+visible)
-
-	case "home":
-		m.actionCursor = 0
-
-	case "end":
-		m.actionCursor = len(m.actions) - 1
-
+	switch key {
 	case "enter":
 		m.selectedAction = action(m.actionCursor)
 
@@ -1116,31 +1078,12 @@ func (m model) updateFileHistorySearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateFileHistorySelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	visible := m.visibleListCount(10)
+	visible := m.visibleListCount(12)
+	key := msg.String()
 
-	switch msg.String() {
-	case "up", "k":
-		if m.fileHistoryCursor > 0 {
-			m.fileHistoryCursor--
-		}
+	m.fileHistoryCursor = navigateCursor(m.fileHistoryCursor, len(m.fileHistoryItems), visible, key)
 
-	case "down", "j":
-		if m.fileHistoryCursor < len(m.fileHistoryItems)-1 {
-			m.fileHistoryCursor++
-		}
-
-	case "pgup":
-		m.fileHistoryCursor = max(0, m.fileHistoryCursor-visible)
-
-	case "pgdown":
-		m.fileHistoryCursor = min(len(m.fileHistoryItems)-1, m.fileHistoryCursor+visible)
-
-	case "home":
-		m.fileHistoryCursor = 0
-
-	case "end":
-		m.fileHistoryCursor = len(m.fileHistoryItems) - 1
-
+	switch key {
 	case "enter":
 		if len(m.fileHistoryItems) == 0 {
 			return m, nil
@@ -1158,36 +1101,13 @@ func (m model) updateFileHistorySelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	visible := m.visibleListCount(8)
+	visible := m.visibleListCount(10)
+	key := msg.String()
 
-	switch msg.String() {
-	case "up", "k":
+	switch key {
+	case "up", "k", "down", "j", "pgup", "pgdown", "home", "end":
 		m.branchNumberInput = ""
-		if m.branchCursor > 0 {
-			m.branchCursor--
-		}
-
-	case "down", "j":
-		m.branchNumberInput = ""
-		if m.branchCursor < len(m.branches)-1 {
-			m.branchCursor++
-		}
-
-	case "pgup":
-		m.branchNumberInput = ""
-		m.branchCursor = max(0, m.branchCursor-visible)
-
-	case "pgdown":
-		m.branchNumberInput = ""
-		m.branchCursor = min(len(m.branches)-1, m.branchCursor+visible)
-
-	case "home":
-		m.branchNumberInput = ""
-		m.branchCursor = 0
-
-	case "end":
-		m.branchNumberInput = ""
-		m.branchCursor = len(m.branches) - 1
+		m.branchCursor = navigateCursor(m.branchCursor, len(m.branches), visible, key)
 
 	case "backspace", "ctrl+h":
 		if len(m.branchNumberInput) > 0 {
@@ -1217,7 +1137,6 @@ func (m model) updateBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, switchBranchCmd(m.activeRepo, selected.Name)
 
 	default:
-		key := msg.String()
 		if len(key) == 1 && key[0] >= '0' && key[0] <= '9' {
 			m.branchNumberInput += key
 			if len(m.branchNumberInput) > 6 {
@@ -1237,31 +1156,12 @@ func (m model) updateBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updatePullSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	visible := m.visibleListCount(10)
+	visible := m.visibleListCount(12)
+	key := msg.String()
 
-	switch msg.String() {
-	case "up", "k":
-		if m.commitCursor > 0 {
-			m.commitCursor--
-		}
+	m.commitCursor = navigateCursor(m.commitCursor, len(m.commitItems), visible, key)
 
-	case "down", "j":
-		if m.commitCursor < len(m.commitItems)-1 {
-			m.commitCursor++
-		}
-
-	case "pgup":
-		m.commitCursor = max(0, m.commitCursor-visible)
-
-	case "pgdown":
-		m.commitCursor = min(len(m.commitItems)-1, m.commitCursor+visible)
-
-	case "home":
-		m.commitCursor = 0
-
-	case "end":
-		m.commitCursor = len(m.commitItems) - 1
-
+	switch key {
 	case " ":
 		if len(m.commitItems) > 0 {
 			m.commitItems[m.commitCursor].Selected = !m.commitItems[m.commitCursor].Selected
@@ -1308,31 +1208,12 @@ func (m model) updatePullSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateCommitSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	visible := m.visibleListCount(10)
+	visible := m.visibleListCount(12)
+	key := msg.String()
 
-	switch msg.String() {
-	case "up", "k":
-		if m.commitCursor > 0 {
-			m.commitCursor--
-		}
+	m.commitCursor = navigateCursor(m.commitCursor, len(m.commitItems), visible, key)
 
-	case "down", "j":
-		if m.commitCursor < len(m.commitItems)-1 {
-			m.commitCursor++
-		}
-
-	case "pgup":
-		m.commitCursor = max(0, m.commitCursor-visible)
-
-	case "pgdown":
-		m.commitCursor = min(len(m.commitItems)-1, m.commitCursor+visible)
-
-	case "home":
-		m.commitCursor = 0
-
-	case "end":
-		m.commitCursor = len(m.commitItems) - 1
-
+	switch key {
 	case " ":
 		if len(m.commitItems) > 0 {
 			m.commitItems[m.commitCursor].Selected = !m.commitItems[m.commitCursor].Selected
@@ -1406,7 +1287,9 @@ func (m model) updateCommitSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updatePartialHunkSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	visible := m.visibleListCount(10)
+	const maxPreview = 8
+	const pageStep = 5 // hunks to jump on PgUp/PgDn
+	availHeight := m.visibleListCount(10)
 
 	switch msg.String() {
 	case "up", "k":
@@ -1420,10 +1303,10 @@ func (m model) updatePartialHunkSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "pgup":
-		m.partialHunkCursor = max(0, m.partialHunkCursor-visible)
+		m.partialHunkCursor = max(0, m.partialHunkCursor-pageStep)
 
 	case "pgdown":
-		m.partialHunkCursor = min(len(m.partialHunks)-1, m.partialHunkCursor+visible)
+		m.partialHunkCursor = min(len(m.partialHunks)-1, m.partialHunkCursor+pageStep)
 
 	case "home":
 		m.partialHunkCursor = 0
@@ -1462,37 +1345,18 @@ func (m model) updatePartialHunkSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.screen = screenCommitMessageInput
 	}
 
-	m.partialHunkOffset = adjustOffset(m.partialHunkOffset, m.partialHunkCursor, visible)
+	m.partialHunkOffset = adjustHunkOffset(m.partialHunkOffset, m.partialHunkCursor, m.partialHunks, availHeight, maxPreview)
 
 	return m, nil
 }
 
 func (m model) updateRevertSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	visible := m.visibleListCount(10)
+	visible := m.visibleListCount(12)
+	key := msg.String()
 
-	switch msg.String() {
-	case "up", "k":
-		if m.commitCursor > 0 {
-			m.commitCursor--
-		}
+	m.commitCursor = navigateCursor(m.commitCursor, len(m.commitItems), visible, key)
 
-	case "down", "j":
-		if m.commitCursor < len(m.commitItems)-1 {
-			m.commitCursor++
-		}
-
-	case "pgup":
-		m.commitCursor = max(0, m.commitCursor-visible)
-
-	case "pgdown":
-		m.commitCursor = min(len(m.commitItems)-1, m.commitCursor+visible)
-
-	case "home":
-		m.commitCursor = 0
-
-	case "end":
-		m.commitCursor = len(m.commitItems) - 1
-
+	switch key {
 	case " ":
 		if len(m.commitItems) > 0 {
 			m.commitItems[m.commitCursor].Selected = !m.commitItems[m.commitCursor].Selected
@@ -1578,32 +1442,16 @@ func (m model) updateCommitMessageInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateConflictSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	visible := m.visibleListCount(10)
+	visible := m.visibleListCount(12)
+	key := msg.String()
 
-	switch msg.String() {
-	case "up", "k":
-		if m.conflictCursor > 0 {
-			m.conflictCursor--
-		}
+	m.conflictCursor = navigateCursor(m.conflictCursor, len(m.conflictItems), visible, key)
 
-	case "down", "j":
-		if m.conflictCursor < len(m.conflictItems)-1 {
-			m.conflictCursor++
-		}
-
-	case "pgup":
-		m.conflictCursor = max(0, m.conflictCursor-visible)
-
-	case "pgdown":
-		m.conflictCursor = min(len(m.conflictItems)-1, m.conflictCursor+visible)
-
-	case "home":
-		m.conflictCursor = 0
-
-	case "end":
-		m.conflictCursor = len(m.conflictItems) - 1
-
+	switch key {
 	case "enter":
+		if len(m.conflictItems) == 0 {
+			return m, nil
+		}
 		selected := m.conflictItems[m.conflictCursor]
 
 		m.screen = screenRunning
@@ -1962,8 +1810,18 @@ func (m model) viewPartialHunkSelect() string {
 	b.WriteString(textStyle.Render("Choose hunks to commit:") + "\n")
 	b.WriteString(mutedStyle.Render("-----------------------") + "\n")
 
-	visible := m.visibleListCount(12)
-	end := min(len(m.partialHunks), m.partialHunkOffset+visible)
+	const maxPreview = 8
+	availHeight := m.visibleListCount(12)
+	end := m.partialHunkOffset
+	linesUsed := 0
+	for i := m.partialHunkOffset; i < len(m.partialHunks); i++ {
+		need := hunkDisplayLines(m.partialHunks[i], maxPreview)
+		if linesUsed+need > availHeight {
+			break
+		}
+		linesUsed += need
+		end = i + 1
+	}
 
 	for i := m.partialHunkOffset; i < end; i++ {
 		hunk := m.partialHunks[i]
@@ -4074,69 +3932,6 @@ func containsString(items []string, needle string) bool {
 	return false
 }
 
-type revisionTreePathSummary struct {
-	Action       string
-	Path         string
-	Kind         string
-	CopyFromPath string
-	CopyFromRev  int
-}
-
-func summarizeRevisionTreePaths(paths []svnLogPathXML) []revisionTreePathSummary {
-	byKey := make(map[string]revisionTreePathSummary)
-
-	for _, path := range paths {
-		root, kind := revisionTreeRootPath(path.Path)
-		if root == "" {
-			continue
-		}
-
-		action := strings.TrimSpace(path.Action)
-		if action == "" {
-			action = "M"
-		}
-
-		summary := revisionTreePathSummary{
-			Action: action,
-			Path:   root,
-			Kind:   kind,
-		}
-
-		if strings.TrimSpace(path.CopyFromPath) != "" {
-			copyRoot, _ := revisionTreeRootPath(path.CopyFromPath)
-			if copyRoot == "" {
-				copyRoot = normalizeSVNTreePath(path.CopyFromPath)
-			}
-			summary.CopyFromPath = copyRoot
-			summary.CopyFromRev = path.CopyFromRev
-		}
-
-		key := summary.Action + "|" + summary.Path + "|" + summary.CopyFromPath + fmt.Sprintf("|%d", summary.CopyFromRev)
-		if existing, ok := byKey[key]; ok {
-			if existing.Kind == "" {
-				existing.Kind = summary.Kind
-			}
-			byKey[key] = existing
-			continue
-		}
-		byKey[key] = summary
-	}
-
-	items := make([]revisionTreePathSummary, 0, len(byKey))
-	for _, item := range byKey {
-		items = append(items, item)
-	}
-
-	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].Path == items[j].Path {
-			return items[i].Action < items[j].Action
-		}
-		return items[i].Path < items[j].Path
-	})
-
-	return items
-}
-
 func revisionTreeRootPath(path string) (string, string) {
 	clean := strings.Trim(normalizeSVNTreePath(path), "/")
 	if clean == "" {
@@ -4372,9 +4167,18 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 	// The middle separator is 7 columns wide: " │ Δ │ ".
 	usableWidth := max(72, width)
 	separatorWidth := lipgloss.Width(" │ Δ │ ")
-	cellSpace := usableWidth - separatorWidth
-	if cellSpace < 60 {
-		cellSpace = 60
+
+	// Calculate line-number column width based on the expected file size.
+	// We don't know the exact line counts yet, so use a conservative estimate;
+	// it will be refined after reading the files (see below).
+	numWidth := 4 // will be updated once we know the actual line counts
+
+	// numColOverhead: each side has a numWidth-wide number column plus " │ " separator.
+	numColOverhead := 2 * (numWidth + lipgloss.Width(" │ "))
+
+	cellSpace := usableWidth - separatorWidth - numColOverhead
+	if cellSpace < 48 {
+		cellSpace = 48
 	}
 
 	leftWidth := max(24, cellSpace/2)
@@ -4423,6 +4227,23 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 	oldLines := splitLinesForDiff(oldText)
 	newLines := splitLinesForDiff(newText)
 
+	// Recalculate numWidth and column widths now that we know the actual line counts.
+	maxLines := max(len(oldLines), len(newLines))
+	if maxLines < 1 {
+		maxLines = 1
+	}
+	numWidth = len(fmt.Sprintf("%d", maxLines))
+	if numWidth < 1 {
+		numWidth = 1
+	}
+	numColOverhead = 2 * (numWidth + lipgloss.Width(" │ "))
+	cellSpace = usableWidth - separatorWidth - numColOverhead
+	if cellSpace < 48 {
+		cellSpace = 48
+	}
+	leftWidth = max(24, cellSpace/2)
+	rightWidth = max(24, cellSpace-leftWidth)
+
 	var b strings.Builder
 
 	b.WriteString("Path: " + item.Path + "\n")
@@ -4434,12 +4255,12 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 		b.WriteString("Note: added file, left side is empty and right side shows the new file content.\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(renderDiffHeader(leftWidth, rightWidth))
+	b.WriteString(renderDiffHeader(leftWidth, rightWidth, numWidth))
 
 	rows := sideBySideRows(oldLines, newLines)
 
 	if len(rows) == 0 {
-		b.WriteString(renderDiffLine("", "", "=", leftWidth, rightWidth) + "\n")
+		b.WriteString(renderDiffLine("", "", "=", leftWidth, rightWidth, 0, 0, numWidth) + "\n")
 		return b.String(), nil
 	}
 
@@ -4462,26 +4283,37 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 			}
 
 			marker := row.Marker
+			leftNum := row.LeftNum
+			rightNum := row.RightNum
 			if i > 0 {
 				marker = " "
+				leftNum = 0
+				rightNum = 0
 			}
 
-			b.WriteString(renderDiffLine(left, right, marker, leftWidth, rightWidth) + "\n")
+			b.WriteString(renderDiffLine(left, right, marker, leftWidth, rightWidth, leftNum, rightNum, numWidth) + "\n")
 		}
 	}
 
 	return b.String(), nil
 }
 
-func renderDiffHeader(leftWidth int, rightWidth int) string {
+func renderDiffHeader(leftWidth int, rightWidth int, numWidth int) string {
+	numPad := strings.Repeat(" ", numWidth)
+	numSep := mutedStyle.Render(" │ ")
 	left := labelMauveStyle.Render(padRightVisual("OLD / BASE", leftWidth))
 	right := labelMauveStyle.Render(padRightVisual("NEW / WORKING COPY", rightWidth))
 	sep := mutedStyle.Render(" │ Δ │ ")
-	rule := mutedStyle.Render(strings.Repeat("─", leftWidth) + "─┼───┼─" + strings.Repeat("─", rightWidth))
-	return left + sep + right + "\n" + rule + "\n"
+	rule := mutedStyle.Render(
+		strings.Repeat("─", numWidth) + "─┼─" +
+			strings.Repeat("─", leftWidth) + "─┼───┼─" +
+			strings.Repeat("─", numWidth) + "─┼─" +
+			strings.Repeat("─", rightWidth),
+	)
+	return mutedStyle.Render(numPad) + numSep + left + sep + mutedStyle.Render(numPad) + numSep + right + "\n" + rule + "\n"
 }
 
-func renderDiffLine(left string, right string, marker string, leftWidth int, rightWidth int) string {
+func renderDiffLine(left string, right string, marker string, leftWidth int, rightWidth int, leftNum int, rightNum int, numWidth int) string {
 	left = expandTabsForDisplay(left)
 	right = expandTabsForDisplay(right)
 
@@ -4493,7 +4325,20 @@ func renderDiffLine(left string, right string, marker string, leftWidth int, rig
 		markerCell = mutedStyle.Render(marker)
 	}
 
-	return leftCell + mutedStyle.Render(" │ ") + markerCell + mutedStyle.Render(" │ ") + rightCell
+	var leftNumStr, rightNumStr string
+	if leftNum > 0 {
+		leftNumStr = fmt.Sprintf("%*d", numWidth, leftNum)
+	} else {
+		leftNumStr = strings.Repeat(" ", numWidth)
+	}
+	if rightNum > 0 {
+		rightNumStr = fmt.Sprintf("%*d", numWidth, rightNum)
+	} else {
+		rightNumStr = strings.Repeat(" ", numWidth)
+	}
+
+	numSep := mutedStyle.Render(" │ ")
+	return mutedStyle.Render(leftNumStr) + numSep + leftCell + mutedStyle.Render(" │ ") + markerCell + mutedStyle.Render(" │ ") + mutedStyle.Render(rightNumStr) + numSep + rightCell
 }
 
 func diffStyleForMarker(marker string) lipgloss.Style {
@@ -4609,9 +4454,11 @@ func readRepoHeadFile(r repo, path string) (string, error) {
 }
 
 type diffRow struct {
-	Left   string
-	Right  string
-	Marker string
+	Left     string
+	Right    string
+	Marker   string
+	LeftNum  int // 1-based old file line number; 0 = no number (empty side / separator)
+	RightNum int // 1-based new file line number; 0 = no number
 }
 
 func sideBySideRows(oldLines []string, newLines []string) []diffRow {
@@ -4643,9 +4490,11 @@ func sideBySideRows(oldLines []string, newLines []string) []diffRow {
 	for i < n && j < m {
 		if oldLines[i] == newLines[j] {
 			rows = append(rows, diffRow{
-				Left:   oldLines[i],
-				Right:  newLines[j],
-				Marker: "=",
+				Left:     oldLines[i],
+				Right:    newLines[j],
+				Marker:   "=",
+				LeftNum:  i + 1,
+				RightNum: j + 1,
 			})
 			i++
 			j++
@@ -4654,9 +4503,10 @@ func sideBySideRows(oldLines []string, newLines []string) []diffRow {
 
 		if i+1 < n && oldLines[i+1] == newLines[j] {
 			rows = append(rows, diffRow{
-				Left:   oldLines[i],
-				Right:  "",
-				Marker: "-",
+				Left:    oldLines[i],
+				Right:   "",
+				Marker:  "-",
+				LeftNum: i + 1,
 			})
 			i++
 			continue
@@ -4664,9 +4514,10 @@ func sideBySideRows(oldLines []string, newLines []string) []diffRow {
 
 		if j+1 < m && oldLines[i] == newLines[j+1] {
 			rows = append(rows, diffRow{
-				Left:   "",
-				Right:  newLines[j],
-				Marker: "+",
+				Left:     "",
+				Right:    newLines[j],
+				Marker:   "+",
+				RightNum: j + 1,
 			})
 			j++
 			continue
@@ -4674,23 +4525,27 @@ func sideBySideRows(oldLines []string, newLines []string) []diffRow {
 
 		if dp[i+1][j] > dp[i][j+1] {
 			rows = append(rows, diffRow{
-				Left:   oldLines[i],
-				Right:  "",
-				Marker: "-",
+				Left:    oldLines[i],
+				Right:   "",
+				Marker:  "-",
+				LeftNum: i + 1,
 			})
 			i++
 		} else if dp[i][j+1] > dp[i+1][j] {
 			rows = append(rows, diffRow{
-				Left:   "",
-				Right:  newLines[j],
-				Marker: "+",
+				Left:     "",
+				Right:    newLines[j],
+				Marker:   "+",
+				RightNum: j + 1,
 			})
 			j++
 		} else {
 			rows = append(rows, diffRow{
-				Left:   oldLines[i],
-				Right:  newLines[j],
-				Marker: "~",
+				Left:     oldLines[i],
+				Right:    newLines[j],
+				Marker:   "~",
+				LeftNum:  i + 1,
+				RightNum: j + 1,
 			})
 			i++
 			j++
@@ -4699,18 +4554,20 @@ func sideBySideRows(oldLines []string, newLines []string) []diffRow {
 
 	for i < n {
 		rows = append(rows, diffRow{
-			Left:   oldLines[i],
-			Right:  "",
-			Marker: "-",
+			Left:    oldLines[i],
+			Right:   "",
+			Marker:  "-",
+			LeftNum: i + 1,
 		})
 		i++
 	}
 
 	for j < m {
 		rows = append(rows, diffRow{
-			Left:   "",
-			Right:  newLines[j],
-			Marker: "+",
+			Left:     "",
+			Right:    newLines[j],
+			Marker:   "+",
+			RightNum: j + 1,
 		})
 		j++
 	}
@@ -4822,37 +4679,6 @@ func splitLinesForDiff(text string) []string {
 	}
 
 	return lines
-}
-
-func wrapLine(s string, width int) []string {
-	if width <= 0 {
-		return []string{s}
-	}
-
-	if s == "" {
-		return []string{""}
-	}
-
-	runes := []rune(s)
-	var parts []string
-
-	for len(runes) > width {
-		parts = append(parts, string(runes[:width]))
-		runes = runes[width:]
-	}
-
-	parts = append(parts, string(runes))
-
-	return parts
-}
-
-func padRight(s string, width int) string {
-	runes := []rune(s)
-	if len(runes) >= width {
-		return string(runes[:width])
-	}
-
-	return s + strings.Repeat(" ", width-len(runes))
 }
 
 var unifiedHunkHeaderRe = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
@@ -5321,6 +5147,96 @@ func (m model) visibleListCount(reservedLines int) int {
 	}
 
 	return count
+}
+
+// hunkPreviewLineCount returns how many preview lines a hunk occupies in the
+// list view (changed lines only, capped at maxLines, +1 for the "..." row if
+// truncated).
+func hunkPreviewLineCount(h partialHunk, maxLines int) int {
+	count := 0
+	for _, line := range h.Lines {
+		if line == "" || line[0] == ' ' {
+			continue
+		}
+		if line[0] == '+' || line[0] == '-' {
+			count++
+		}
+	}
+	if count > maxLines {
+		return maxLines + 1 // the last slot is the "..." row
+	}
+	return count
+}
+
+// hunkDisplayLines returns the total number of terminal lines a hunk entry
+// occupies: 1 summary line + its preview lines.
+func hunkDisplayLines(h partialHunk, maxPreview int) int {
+	return 1 + hunkPreviewLineCount(h, maxPreview)
+}
+
+// adjustHunkOffset returns a new scroll offset so that the hunk at `cursor`
+// is visible within `availHeight` terminal lines.  Each hunk may span
+// multiple lines (summary + preview), so a plain "cursor < offset+visible"
+// check is not sufficient.
+func adjustHunkOffset(offset int, cursor int, hunks []partialHunk, availHeight int, maxPreview int) int {
+	if len(hunks) == 0 {
+		return 0
+	}
+	// Cursor scrolled above the window → snap to cursor.
+	if cursor < offset {
+		return cursor
+	}
+	// Check whether cursor falls within the currently visible range.
+	used := 0
+	for i := offset; i < len(hunks); i++ {
+		h := hunkDisplayLines(hunks[i], maxPreview)
+		if used+h > availHeight {
+			// cursor is below this window → need to scroll down
+			break
+		}
+		used += h
+		if i == cursor {
+			return offset // cursor is visible, no change needed
+		}
+	}
+	// Cursor is below the visible window.  Back-fill from cursor upward until
+	// we fill the available height, then the new offset is one past the last
+	// hunk that didn't fit.
+	used = 0
+	newOffset := cursor
+	for i := cursor; i >= 0; i-- {
+		h := hunkDisplayLines(hunks[i], maxPreview)
+		if used+h > availHeight {
+			newOffset = i + 1
+			break
+		}
+		used += h
+		newOffset = i
+	}
+	return newOffset
+}
+
+// navigateCursor applies standard list-navigation keys (up/down/pgup/pgdown/
+// home/end) to a cursor and returns the new cursor value.
+func navigateCursor(cursor, listLen, pageSize int, key string) int {
+	if listLen == 0 {
+		return 0
+	}
+	switch key {
+	case "up", "k":
+		return max(0, cursor-1)
+	case "down", "j":
+		return min(listLen-1, cursor+1)
+	case "pgup":
+		return max(0, cursor-pageSize)
+	case "pgdown":
+		return min(listLen-1, cursor+pageSize)
+	case "home":
+		return 0
+	case "end":
+		return listLen - 1
+	}
+	return cursor
 }
 
 func adjustOffset(offset int, cursor int, visible int) int {
