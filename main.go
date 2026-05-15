@@ -98,6 +98,7 @@ type commandResult struct {
 	Output          string
 	Err             error
 	CurrentLocation string
+	URL             string
 }
 
 type branchesLoadedMsg struct {
@@ -742,6 +743,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for i := range m.repos {
 				if m.repos[i].Path == m.activeRepo.Path {
 					m.repos[i].CurrentLocation = msg.CurrentLocation
+					break
+				}
+			}
+		}
+
+		if msg.URL != "" {
+			m.activeRepo.URL = msg.URL
+
+			for i := range m.repos {
+				if m.repos[i].Path == m.activeRepo.Path {
+					m.repos[i].URL = msg.URL
 					break
 				}
 			}
@@ -2537,6 +2549,7 @@ func createBranchCmd(r repo, parameter string) tea.Cmd {
 			Output:          output.String(),
 			Err:             nil,
 			CurrentLocation: getCurrentLocation(r),
+			URL:             getCurrentURL(r),
 		}
 	}
 }
@@ -2568,6 +2581,7 @@ func switchBranchCmd(r repo, branchName string) tea.Cmd {
 			Output:          output.String(),
 			Err:             err,
 			CurrentLocation: getCurrentLocation(r),
+			URL:             getCurrentURL(r),
 		}
 	}
 }
@@ -2602,6 +2616,7 @@ func switchTrunkCmd(r repo) tea.Cmd {
 			Output:          output.String(),
 			Err:             err,
 			CurrentLocation: getCurrentLocation(r),
+			URL:             getCurrentURL(r),
 		}
 	}
 }
@@ -5081,6 +5096,14 @@ func svnBaseArgs(r repo, nonInteractive bool) []string {
 	}
 
 	return finalArgs
+}
+
+func getCurrentURL(r repo) string {
+	out, err := svn(r, "info", "--show-item", "url")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
 }
 
 func getCurrentLocation(r repo) string {
