@@ -2249,9 +2249,6 @@ func (m model) viewDiff() string {
 	b.WriteString(repoInfoHeader("Side-by-side diff viewer", m.activeRepo))
 	b.WriteString(mutedStyle.Render("Legend: = same | - removed/old | + added/new | ~ changed") + "\n")
 	b.WriteString(mutedStyle.Render("↑/↓: scroll | PgUp/PgDn: page | Home/End: jump | Esc: back") + "\n\n")
-	// Do not wrap the diff viewport in textStyle.Render. The diff body already
-	// contains ANSI styling, and applying a parent foreground can flatten or
-	// override the per-line colors in some terminals.
 	b.WriteString(m.viewport.View())
 
 	return b.String()
@@ -2923,9 +2920,9 @@ func diffCmd(r repo, item commitItem, width int) tea.Cmd {
 		out, err := buildSideBySideDiff(r, item, width)
 
 		if err != nil {
-			fallbackOut, fallbackErr := svn(r, "diff", "--", item.Path)
+			fallbackOut, fallbackErr := svn(r, "diff", item.Path)
 			if fallbackOut != "" {
-				out += "\n\nUnified svn diff fallback:\n\n" + colorizeUnifiedDiff(fallbackOut)
+				out += "\n\nUnified svn diff fallback:\n\n" + fallbackOut
 			}
 
 			if fallbackErr != nil {
@@ -4274,23 +4271,17 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 		width = 160
 	}
 
-	// The separator is rendered literally between the two fixed-width cells.
-	// Keep all width math visual-width based, otherwise tabs, ANSI codes and
-	// wider Unicode glyphs will push the │ Δ │ column out of alignment.
+	// Keep the side-by-side table inside the actual viewport width.
+	// The middle separator is 7 columns wide: " │ Δ │ ".
+	usableWidth := max(72, width)
 	separatorWidth := lipgloss.Width(" │ Δ │ ")
-	available := width - separatorWidth
-	if available < 60 {
-		available = 60
+	cellSpace := usableWidth - separatorWidth
+	if cellSpace < 60 {
+		cellSpace = 60
 	}
 
-	leftWidth := available / 2
-	rightWidth := available - leftWidth
-	if leftWidth < 24 {
-		leftWidth = 24
-	}
-	if rightWidth < 24 {
-		rightWidth = 24
-	}
+	leftWidth := max(24, cellSpace/2)
+	rightWidth := max(24, cellSpace-leftWidth)
 
 	if isLikelyDirectory(r, item.Path) {
 		out, err := svn(r, "diff", "--", item.Path)
@@ -4309,12 +4300,12 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 		oldText = ""
 		newText, err = readWorkingFile(r, item.Path)
 		if err != nil {
-			newText, err = readHeadFile(r, item.Path)
-			if err != nil {
-				return "", err
-			}
+			newText, err = readRepoHeadFile(r, item.Path)
 		}
-	} else if strings.HasPrefix(item.Status, "D") || strings.HasPrefix(item.Status, "!") {
+		if err != nil {
+			return "", err
+		}
+	} else if strings.HasPrefix(item.Status, "D") {
 		oldText, err = readBaseFile(r, item.Path)
 		if err != nil {
 			return "", err
@@ -4341,24 +4332,25 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 	b.WriteString("Status: " + item.Status + "\n")
 	if item.Unversioned {
 		b.WriteString("Note: unversioned file, left side is empty. It will be svn add-ed before commit if selected.\n")
-	} else if strings.HasPrefix(item.Status, "A") {
+	}
+	if strings.HasPrefix(item.Status, "A") {
 		b.WriteString("Note: added file, left side is empty and right side shows the new file content.\n")
-	} else if strings.HasPrefix(item.Status, "!") {
-		b.WriteString("Note: missing path, right side is empty. Use r in the commit screen if you want to svn delete --force it.\n")
 	}
 	b.WriteString("\n")
 	b.WriteString(renderDiffHeader(leftWidth, rightWidth))
 
-	rows := compactUnchangedRows(sideBySideRows(oldLines, newLines), 3)
+	rows := sideBySideRows(oldLines, newLines)
 
 	if len(rows) == 0 {
-		b.WriteString(renderSideBySideDiffLine("", "", "=", leftWidth, rightWidth) + "\n")
+		b.WriteString(renderDiffLine("", "", "=", leftWidth, rightWidth) + "\n")
 		return b.String(), nil
 	}
 
+	rows = compactUnchangedRows(rows, 4)
+
 	for _, row := range rows {
-		leftWrapped := wrapVisualLine(row.Left, leftWidth)
-		rightWrapped := wrapVisualLine(row.Right, rightWidth)
+		leftWrapped := wrapLineForDiff(row.Left, leftWidth)
+		rightWrapped := wrapLineForDiff(row.Right, rightWidth)
 
 		maxParts := max(len(leftWrapped), len(rightWrapped))
 		for i := 0; i < maxParts; i++ {
@@ -4377,7 +4369,7 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 				marker = " "
 			}
 
-			b.WriteString(renderSideBySideDiffLine(left, right, marker, leftWidth, rightWidth) + "\n")
+			b.WriteString(renderDiffLine(left, right, marker, leftWidth, rightWidth) + "\n")
 		}
 	}
 
@@ -4385,30 +4377,138 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 }
 
 func renderDiffHeader(leftWidth int, rightWidth int) string {
-	leftHeader := padRightVisual("OLD / BASE", leftWidth)
-	rightHeader := padRightVisual("NEW / WORKING COPY", rightWidth)
-	line := strings.Repeat("─", leftWidth) + "─┼───┼─" + strings.Repeat("─", rightWidth)
-
-	return labelMauveStyle.Render(leftHeader) + mutedStyle.Render(" │ Δ │ ") + labelMauveStyle.Render(rightHeader) + "\n" + mutedStyle.Render(line) + "\n"
+	left := labelMauveStyle.Render(padRightVisual("OLD / BASE", leftWidth))
+	right := labelMauveStyle.Render(padRightVisual("NEW / WORKING COPY", rightWidth))
+	sep := mutedStyle.Render(" │ Δ │ ")
+	rule := mutedStyle.Render(strings.Repeat("─", leftWidth) + "─┼───┼─" + strings.Repeat("─", rightWidth))
+	return left + sep + right + "\n" + rule + "\n"
 }
 
-func renderSideBySideDiffLine(left string, right string, marker string, leftWidth int, rightWidth int) string {
-	leftCell := padRightVisual(left, leftWidth)
-	rightCell := padRightVisual(right, rightWidth)
-	markerCell := padRightVisual(marker, 1)
+func renderDiffLine(left string, right string, marker string, leftWidth int, rightWidth int) string {
+	left = expandTabsForDisplay(left)
+	right = expandTabsForDisplay(right)
 
+	style := diffStyleForMarker(marker)
+	leftCell := style.Render(padRightVisual(left, leftWidth))
+	rightCell := style.Render(padRightVisual(right, rightWidth))
+	markerCell := diffStyleForMarker(marker).Render(marker)
+	if marker == " " {
+		markerCell = mutedStyle.Render(marker)
+	}
+
+	return leftCell + mutedStyle.Render(" │ ") + markerCell + mutedStyle.Render(" │ ") + rightCell
+}
+
+func diffStyleForMarker(marker string) lipgloss.Style {
 	switch marker {
 	case "+":
-		return diffSameStyle.Render(leftCell) + mutedStyle.Render(" │ ") + diffAddedStyle.Render(markerCell) + mutedStyle.Render(" │ ") + diffAddedStyle.Render(rightCell)
+		return diffAddedStyle
 	case "-":
-		return diffDeletedStyle.Render(leftCell) + mutedStyle.Render(" │ ") + diffDeletedStyle.Render(markerCell) + mutedStyle.Render(" │ ") + diffSameStyle.Render(rightCell)
+		return diffDeletedStyle
 	case "~":
-		return diffDeletedStyle.Render(leftCell) + mutedStyle.Render(" │ ") + diffModifiedStyle.Render(markerCell) + mutedStyle.Render(" │ ") + diffAddedStyle.Render(rightCell)
-	case " ":
-		return diffSameStyle.Render(leftCell) + mutedStyle.Render(" │ ") + mutedStyle.Render(markerCell) + mutedStyle.Render(" │ ") + diffSameStyle.Render(rightCell)
+		return diffModifiedStyle
+	case "=":
+		return diffSameStyle
 	default:
-		return diffSameStyle.Render(leftCell) + mutedStyle.Render(" │ ") + diffSameStyle.Render(markerCell) + mutedStyle.Render(" │ ") + diffSameStyle.Render(rightCell)
+		return mutedStyle
 	}
+}
+
+func wrapLineForDiff(s string, width int) []string {
+	s = expandTabsForDisplay(s)
+	if width <= 0 {
+		return []string{s}
+	}
+	if s == "" {
+		return []string{""}
+	}
+
+	var parts []string
+	var current strings.Builder
+	currentWidth := 0
+
+	for _, r := range s {
+		rw := lipgloss.Width(string(r))
+		if rw <= 0 {
+			rw = 1
+		}
+		if currentWidth > 0 && currentWidth+rw > width {
+			parts = append(parts, current.String())
+			current.Reset()
+			currentWidth = 0
+		}
+		current.WriteRune(r)
+		currentWidth += rw
+	}
+
+	parts = append(parts, current.String())
+	return parts
+}
+
+func padRightVisual(s string, width int) string {
+	s = truncateVisual(s, width)
+	visible := lipgloss.Width(s)
+	if visible >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-visible)
+}
+
+func truncateVisual(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	used := 0
+	for _, r := range s {
+		rw := lipgloss.Width(string(r))
+		if rw <= 0 {
+			rw = 1
+		}
+		if used+rw > width {
+			break
+		}
+		b.WriteRune(r)
+		used += rw
+	}
+	return b.String()
+}
+
+func expandTabsForDisplay(s string) string {
+	if !strings.Contains(s, "\t") {
+		return s
+	}
+
+	var b strings.Builder
+	col := 0
+	for _, r := range s {
+		if r == '\t' {
+			spaces := 4 - (col % 4)
+			if spaces == 0 {
+				spaces = 4
+			}
+			b.WriteString(strings.Repeat(" ", spaces))
+			col += spaces
+			continue
+		}
+
+		b.WriteRune(r)
+		w := lipgloss.Width(string(r))
+		if w <= 0 {
+			w = 1
+		}
+		col += w
+	}
+	return b.String()
+}
+
+func readRepoHeadFile(r repo, path string) (string, error) {
+	out, err := svn(r, "cat", "-r", "HEAD", path)
+	if err != nil {
+		return "", err
+	}
+	return out, nil
 }
 
 type diffRow struct {
@@ -4601,15 +4701,6 @@ func readWorkingFile(r repo, path string) (string, error) {
 	return string(data), nil
 }
 
-func readHeadFile(r repo, path string) (string, error) {
-	out, err := svn(r, "cat", "-r", "HEAD", "--", path)
-	if err != nil {
-		return "", err
-	}
-
-	return out, nil
-}
-
 func isLikelyDirectory(r repo, path string) bool {
 	fullPath := filepath.Join(r.Path, filepath.FromSlash(path))
 	info, err := os.Stat(fullPath)
@@ -4637,103 +4728,34 @@ func splitLinesForDiff(text string) []string {
 }
 
 func wrapLine(s string, width int) []string {
-	return wrapVisualLine(s, width)
-}
-
-func wrapVisualLine(s string, width int) []string {
 	if width <= 0 {
 		return []string{s}
 	}
 
-	s = expandTabsForDiff(s, 4)
 	if s == "" {
 		return []string{""}
 	}
 
+	runes := []rune(s)
 	var parts []string
-	var current strings.Builder
-	currentWidth := 0
 
-	for _, r := range s {
-		chunk := string(r)
-		chunkWidth := lipgloss.Width(chunk)
-		if chunkWidth <= 0 {
-			chunkWidth = 1
-		}
-
-		if currentWidth > 0 && currentWidth+chunkWidth > width {
-			parts = append(parts, current.String())
-			current.Reset()
-			currentWidth = 0
-		}
-
-		current.WriteString(chunk)
-		currentWidth += chunkWidth
+	for len(runes) > width {
+		parts = append(parts, string(runes[:width]))
+		runes = runes[width:]
 	}
 
-	parts = append(parts, current.String())
+	parts = append(parts, string(runes))
+
 	return parts
 }
 
 func padRight(s string, width int) string {
-	return padRightVisual(s, width)
-}
-
-func padRightVisual(s string, width int) string {
-	s = expandTabsForDiff(s, 4)
-	currentWidth := lipgloss.Width(s)
-	if currentWidth == width {
-		return s
-	}
-	if currentWidth < width {
-		return s + strings.Repeat(" ", width-currentWidth)
+	runes := []rune(s)
+	if len(runes) >= width {
+		return string(runes[:width])
 	}
 
-	var b strings.Builder
-	used := 0
-	for _, r := range s {
-		chunk := string(r)
-		chunkWidth := lipgloss.Width(chunk)
-		if chunkWidth <= 0 {
-			chunkWidth = 1
-		}
-		if used+chunkWidth > width {
-			break
-		}
-		b.WriteString(chunk)
-		used += chunkWidth
-	}
-
-	if used < width {
-		b.WriteString(strings.Repeat(" ", width-used))
-	}
-
-	return b.String()
-}
-
-func expandTabsForDiff(s string, tabSize int) string {
-	if tabSize <= 0 || !strings.ContainsRune(s, '\t') {
-		return s
-	}
-
-	var b strings.Builder
-	col := 0
-	for _, r := range s {
-		if r == '\t' {
-			spaces := tabSize - (col % tabSize)
-			b.WriteString(strings.Repeat(" ", spaces))
-			col += spaces
-			continue
-		}
-		b.WriteRune(r)
-		w := lipgloss.Width(string(r))
-		if w <= 0 {
-			w = 1
-		}
-		col += w
-	}
-
-	return b.String()
+	return s + strings.Repeat(" ", width-len(runes))
 }
 
 var unifiedHunkHeaderRe = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
