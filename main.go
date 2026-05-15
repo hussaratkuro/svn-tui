@@ -3075,32 +3075,57 @@ func resolveConflictWithMeldCmd(r repo, path string) tea.Cmd {
 			}
 		}
 
-		output.WriteString("Launching Meld through SVN resolve...\n\n")
-		output.WriteString("Running: svn resolve --accept=launch --config-option=config:helpers:merge-tool-cmd=meld " + path + "\n\n")
+		// Parse the conflict file paths from svn info output.
+		// SVN creates: path.mine (local), path.rOLD (base before switch), path.rNEW (incoming)
+		mineFile, oldFile, newFile := parseSVNConflictFiles(infoOut, r.Path, path)
 
-		launchOut, err := svnInteractive(
-			r,
-			"resolve",
-			"--accept=launch",
-			"--config-option=config:helpers:merge-tool-cmd=meld",
-			path,
-		)
+		if mineFile == "" || oldFile == "" || newFile == "" {
+			// Fallback: derive conflict filenames from the working path directly.
+			fullPath := filepath.Join(r.Path, filepath.FromSlash(path))
+			mineFile, oldFile, newFile = guessSVNConflictFiles(fullPath)
+		}
 
-		output.WriteString(launchOut)
-
-		if err != nil {
-			infoOut, _ := svn(r, "info", path)
-
-			output.WriteString("\nMeld/SVN launch failed.\n\n")
-			output.WriteString("SVN info for conflicted path:\n")
+		if mineFile == "" || oldFile == "" || newFile == "" {
+			output.WriteString("Could not locate SVN conflict files (.mine, .rOLD, .rNEW).\n\n")
+			output.WriteString("SVN info:\n")
 			output.WriteString(infoOut)
-			output.WriteString("\n\n")
-			output.WriteString("If this is a tree conflict or directory conflict, use:\n")
+			output.WriteString("\n\nTry resolving manually:\n")
+			output.WriteString("  meld " + path + ".mine " + path + " " + path + ".rHEAD\n")
 			output.WriteString("  svn resolve --accept=working " + path + "\n")
 
 			return commandResult{
 				Output:          output.String(),
-				Err:             err,
+				Err:             fmt.Errorf("conflict files not found"),
+				CurrentLocation: getCurrentLocation(r),
+			}
+		}
+
+		fullPath := filepath.Join(r.Path, filepath.FromSlash(path))
+
+		output.WriteString("Launching Meld directly with conflict files...\n\n")
+		output.WriteString("  Local (mine):    " + mineFile + "\n")
+		output.WriteString("  Base (old rev):  " + oldFile + "\n")
+		output.WriteString("  Incoming (new):  " + newFile + "\n")
+		output.WriteString("  Result:          " + fullPath + "\n\n")
+		output.WriteString("Running: meld " + mineFile + " " + fullPath + " " + newFile + "\n\n")
+		output.WriteString("Edit the middle panel in Meld and save it, then close Meld.\n")
+
+		// Run Meld: left=mine, middle=working copy (result), right=incoming new
+		cmd := exec.Command("meld", mineFile, fullPath, newFile)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		if err := cmd.Run(); err != nil {
+			output.WriteString("\nMeld exited with an error.\n\n")
+			output.WriteString("SVN info for conflicted path:\n")
+			output.WriteString(infoOut)
+			output.WriteString("\n\nIf this is a tree conflict or directory conflict, use:\n")
+			output.WriteString("  svn resolve --accept=working " + path + "\n")
+
+			return commandResult{
+				Output:          output.String(),
+				Err:             fmt.Errorf("meld exited with error: %w", err),
 				CurrentLocation: getCurrentLocation(r),
 			}
 		}
@@ -3134,6 +3159,78 @@ func resolveConflictWithMeldCmd(r repo, path string) tea.Cmd {
 			CurrentLocation: getCurrentLocation(r),
 		}
 	}
+}
+
+// parseSVNConflictFiles extracts the .mine, .rOLD, .rNEW conflict file paths
+// from "svn info" output. SVN reports them as:
+//
+//	Conflict Previous Base File: path.rOLD
+//	Conflict Previous Working File: path.mine
+//	Conflict Current Base File: path.rNEW
+func parseSVNConflictFiles(infoOut, repoPath, relPath string) (mineFile, oldFile, newFile string) {
+	for _, line := range strings.Split(infoOut, "\n") {
+		line = strings.TrimSpace(line)
+		lower := strings.ToLower(line)
+
+		val := func() string {
+			idx := strings.Index(line, ":")
+			if idx < 0 {
+				return ""
+			}
+			v := strings.TrimSpace(line[idx+1:])
+			if v == "" {
+				return ""
+			}
+			if filepath.IsAbs(v) {
+				return v
+			}
+			return filepath.Join(repoPath, filepath.FromSlash(v))
+		}
+
+		switch {
+		case strings.HasPrefix(lower, "conflict previous working file"):
+			mineFile = val()
+		case strings.HasPrefix(lower, "conflict previous base file"):
+			oldFile = val()
+		case strings.HasPrefix(lower, "conflict current base file"):
+			newFile = val()
+		}
+	}
+	return
+}
+
+// guessSVNConflictFiles tries to find .mine and .rNNN files next to the
+// working copy path when svn info does not list them explicitly.
+func guessSVNConflictFiles(fullPath string) (mineFile, oldFile, newFile string) {
+	dir := filepath.Dir(fullPath)
+	base := filepath.Base(fullPath)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+
+	var rFiles []string
+	for _, e := range entries {
+		name := e.Name()
+		if name == base+".mine" {
+			mineFile = filepath.Join(dir, name)
+			continue
+		}
+		if strings.HasPrefix(name, base+".r") && !strings.Contains(name[len(base+".r"):], ".") {
+			rFiles = append(rFiles, filepath.Join(dir, name))
+		}
+	}
+
+	sort.Strings(rFiles)
+	if len(rFiles) >= 2 {
+		oldFile = rFiles[0]
+		newFile = rFiles[len(rFiles)-1]
+	} else if len(rFiles) == 1 {
+		newFile = rFiles[0]
+	}
+
+	return
 }
 
 func searchFileHistoryMatchesCmd(r repo, query string) tea.Cmd {
