@@ -86,6 +86,7 @@ type commitItem struct {
 	Path        string
 	Selected    bool
 	Unversioned bool
+	IsDir       bool
 }
 
 type conflictItem struct {
@@ -1176,17 +1177,40 @@ func (m model) updatePullSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key {
 	case " ":
 		if len(m.commitItems) > 0 {
-			m.commitItems[m.commitCursor].Selected = !m.commitItems[m.commitCursor].Selected
+			item := m.commitItems[m.commitCursor]
+			if item.IsDir {
+				// Count children and check if all are selected
+				allSel := true
+				count := 0
+				for i := m.commitCursor + 1; i < len(m.commitItems) && !m.commitItems[i].IsDir; i++ {
+					count++
+					if !m.commitItems[i].Selected {
+						allSel = false
+					}
+				}
+				if count > 0 {
+					newVal := !allSel
+					for i := m.commitCursor + 1; i < len(m.commitItems) && !m.commitItems[i].IsDir; i++ {
+						m.commitItems[i].Selected = newVal
+					}
+				}
+			} else {
+				m.commitItems[m.commitCursor].Selected = !m.commitItems[m.commitCursor].Selected
+			}
 		}
 
 	case "a":
 		for i := range m.commitItems {
-			m.commitItems[i].Selected = true
+			if !m.commitItems[i].IsDir {
+				m.commitItems[i].Selected = true
+			}
 		}
 
 	case "n":
 		for i := range m.commitItems {
-			m.commitItems[i].Selected = false
+			if !m.commitItems[i].IsDir {
+				m.commitItems[i].Selected = false
+			}
 		}
 
 	case "d":
@@ -1195,13 +1219,22 @@ func (m model) updatePullSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 		item := m.commitItems[m.commitCursor]
+		if item.IsDir {
+			return m, nil
+		}
 		m.screen = screenRunning
 		m.runningTitle = "Loading incoming diff..."
 		return m, remoteDiffCmd(m.activeRepo, item, m.width)
 
 	case "enter":
-		paths := selectedCommitPaths(m.commitItems)
-		if len(paths) == 0 {
+		hasSelected := false
+		for _, item := range m.commitItems {
+			if !item.IsDir && item.Selected {
+				hasSelected = true
+				break
+			}
+		}
+		if !hasSelected {
 			m.screen = screenResult
 			m.err = fmt.Errorf("no files selected")
 			m.result = "Select at least one incoming file with Space before pulling. Use 'a' to select all."
@@ -1209,6 +1242,7 @@ func (m model) updatePullSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		paths := pullUpdatePaths(m.commitItems)
 		m.screen = screenRunning
 		m.runningTitle = "Pulling selected files..."
 		return m, pullCmd(m.activeRepo, paths)
@@ -1717,10 +1751,19 @@ func (m model) viewBranchSelect() string {
 func (m model) viewPullSelect() string {
 	var b strings.Builder
 
-	selectedCount := len(selectedCommitPaths(m.commitItems))
+	totalFiles := 0
+	selectedFiles := 0
+	for _, item := range m.commitItems {
+		if !item.IsDir {
+			totalFiles++
+			if item.Selected {
+				selectedFiles++
+			}
+		}
+	}
 
 	b.WriteString(repoInfoHeader("Pull incoming changes", m.activeRepo))
-	b.WriteString(mutedStyle.Render(fmt.Sprintf("Selected files: %d of %d", selectedCount, len(m.commitItems))) + "\n\n")
+	b.WriteString(mutedStyle.Render(fmt.Sprintf("Selected: %d of %d files", selectedFiles, totalFiles)) + "\n\n")
 	b.WriteString(textStyle.Render("Incoming repository changes:") + "\n")
 	b.WriteString(mutedStyle.Render("----------------------------") + "\n")
 
@@ -1738,24 +1781,46 @@ func (m model) viewPullSelect() string {
 			lineStyle = selectedStyle
 		}
 
-		check := checkboxStyle.Render("[ ]")
-		if item.Selected {
-			check = checkedStyle.Render("[x]")
-		}
-
-		status := colorizePullStatus(item.Status)
-		line := fmt.Sprintf("%s %s ", cursor, check) + status + " " + valueWhiteStyle.Render(item.Path)
-
-		if item.Selected && i != m.commitCursor {
-			b.WriteString(checkedStyle.Render(fmt.Sprintf("%s %s ", cursor, "[x]")) + status + " " + valueWhiteStyle.Render(item.Path) + "\n")
-		} else {
+		if item.IsDir {
+			allSel := true
+			anySel := false
+			count := 0
+			for j := i + 1; j < len(m.commitItems) && !m.commitItems[j].IsDir; j++ {
+				count++
+				if m.commitItems[j].Selected {
+					anySel = true
+				} else {
+					allSel = false
+				}
+			}
+			dirCheck := checkboxStyle.Render("[ ]")
+			if count > 0 && allSel {
+				dirCheck = checkedStyle.Render("[x]")
+			} else if anySel {
+				dirCheck = mutedStyle.Render("[-]")
+			}
+			line := fmt.Sprintf("%s %s ", cursor, dirCheck) + labelMauveStyle.Render(item.Path)
 			b.WriteString(lineStyle.Render(line) + "\n")
+		} else {
+			check := checkboxStyle.Render("[ ]")
+			if item.Selected {
+				check = checkedStyle.Render("[x]")
+			}
+
+			status := colorizePullStatus(item.Status)
+			line := fmt.Sprintf("%s %s ", cursor, check) + status + " " + valueWhiteStyle.Render(item.Path)
+
+			if item.Selected && i != m.commitCursor {
+				b.WriteString(checkedStyle.Render(fmt.Sprintf("%s %s ", cursor, "[x]")) + status + " " + valueWhiteStyle.Render(item.Path) + "\n")
+			} else {
+				b.WriteString(lineStyle.Render(line) + "\n")
+			}
 		}
 	}
 
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render(scrollHint(m.commitOffset, end, len(m.commitItems))) + "\n")
-	b.WriteString(mutedStyle.Render("Space: select | a: all | n: none | d: diff | Enter: pull selected | Esc: back"))
+	b.WriteString(mutedStyle.Render("Space: select/dir | a: all | n: none | d: diff | Enter: pull selected | Esc: back"))
 
 	return b.String()
 }
@@ -2255,14 +2320,62 @@ func loadPullItems(r repo) ([]commitItem, error) {
 		}
 	}
 
+	items = filterParentDirectoryEntries(items)
+
 	sort.SliceStable(items, func(i, j int) bool {
-		if items[i].Status == items[j].Status {
+		di := filepath.Dir(items[i].Path)
+		dj := filepath.Dir(items[j].Path)
+		if di == dj {
 			return items[i].Path < items[j].Path
 		}
-		return items[i].Status < items[j].Status
+		return di < dj
 	})
 
+	items = groupPullItemsByDir(items)
+
 	return items, nil
+}
+
+func filterParentDirectoryEntries(items []commitItem) []commitItem {
+	var result []commitItem
+	for _, item := range items {
+		prefix := item.Path + "/"
+		isParent := false
+		for _, other := range items {
+			if strings.HasPrefix(other.Path, prefix) {
+				isParent = true
+				break
+			}
+		}
+		if !isParent {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func groupPullItemsByDir(items []commitItem) []commitItem {
+	var result []commitItem
+	currentDir := ""
+
+	for _, item := range items {
+		dir := filepath.Dir(item.Path)
+		if dir == "." {
+			dir = ""
+		}
+		if dir != currentDir {
+			currentDir = dir
+			if dir != "" {
+				result = append(result, commitItem{
+					Path:  dir + "/",
+					IsDir: true,
+				})
+			}
+		}
+		result = append(result, item)
+	}
+
+	return result
 }
 
 func parseSVNDiffSummaryLine(line string) (commitItem, bool) {
@@ -2279,7 +2392,7 @@ func parseSVNDiffSummaryLine(line string) (commitItem, bool) {
 	status := strings.TrimSpace(fields[0])
 	path := strings.Join(fields[1:], " ")
 	path = strings.TrimPrefix(filepath.ToSlash(path), "./")
-	if path == "" {
+	if path == "" || path == "." {
 		return commitItem{}, false
 	}
 
@@ -2643,11 +2756,14 @@ func pullCmd(r repo, paths []string) tea.Cmd {
 		}
 
 		args := []string{"update"}
-		args = append(args, paths...)
-
-		output.WriteString("Selected files:\n")
-		for _, path := range paths {
-			output.WriteString("  " + path + "\n")
+		if len(paths) > 0 {
+			args = append(args, paths...)
+			output.WriteString("Selected paths:\n")
+			for _, path := range paths {
+				output.WriteString("  " + path + "\n")
+			}
+		} else {
+			output.WriteString("Updating all files in working copy.\n")
 		}
 		output.WriteString("\nRunning: svn " + strings.Join(args, " ") + "\n\n")
 
@@ -2980,11 +3096,11 @@ func resolveConflictWithMeldCmd(r repo, path string) tea.Cmd {
 		output.WriteString("  Base (old rev):  " + oldFile + "\n")
 		output.WriteString("  Incoming (new):  " + newFile + "\n")
 		output.WriteString("  Result:          " + fullPath + "\n\n")
-		output.WriteString("Running: meld " + mineFile + " " + fullPath + " " + newFile + "\n\n")
-		output.WriteString("Edit the middle panel in Meld and save it, then close Meld.\n")
+		output.WriteString("Running: meld " + mineFile + " " + oldFile + " " + newFile + " --output=" + fullPath + "\n\n")
+		output.WriteString("Merge the changes in Meld and save, then close Meld.\n")
 
-		// Run Meld: left=mine, middle=working copy (result), right=incoming new
-		cmd := exec.Command("meld", mineFile, fullPath, newFile)
+		// Run Meld: left=mine, middle=base (clean ancestor), right=incoming, output=working copy
+		cmd := exec.Command("meld", mineFile, oldFile, newFile, "--output="+fullPath)
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -4934,6 +5050,70 @@ func selectedCommitPaths(items []commitItem) []string {
 	for _, item := range items {
 		if item.Selected {
 			paths = append(paths, item.Path)
+		}
+	}
+
+	return paths
+}
+
+// pullUpdatePaths returns paths to pass to svn update based on selected items.
+// Returns nil if nothing is selected, empty slice if everything is selected
+// (caller should run svn update with no paths to update everything), or a
+// collapsed list where fully-selected directories are represented by their
+// directory path instead of individual files.
+func pullUpdatePaths(items []commitItem) []string {
+	totalFiles := 0
+	selectedFiles := 0
+	for _, item := range items {
+		if !item.IsDir {
+			totalFiles++
+			if item.Selected {
+				selectedFiles++
+			}
+		}
+	}
+
+	if selectedFiles == 0 {
+		return nil
+	}
+
+	// All selected: return empty slice so caller runs svn update without paths
+	if selectedFiles == totalFiles {
+		return []string{}
+	}
+
+	// Partial selection: collapse dirs where all children are selected
+	var paths []string
+	i := 0
+	for i < len(items) {
+		item := items[i]
+		if item.IsDir {
+			dirPath := strings.TrimSuffix(item.Path, "/")
+			j := i + 1
+			allSel := true
+			anySel := false
+			var childPaths []string
+			for j < len(items) && !items[j].IsDir {
+				if items[j].Selected {
+					anySel = true
+					childPaths = append(childPaths, items[j].Path)
+				} else {
+					allSel = false
+				}
+				j++
+			}
+			if allSel && len(childPaths) > 0 {
+				paths = append(paths, dirPath)
+			} else if anySel {
+				paths = append(paths, childPaths...)
+			}
+			i = j
+		} else {
+			// Root-level file (no dir header above it)
+			if item.Selected {
+				paths = append(paths, item.Path)
+			}
+			i++
 		}
 	}
 
