@@ -270,6 +270,10 @@ var (
 			Foreground(catMauve).
 			Bold(true)
 
+	labelRedStyle = lipgloss.NewStyle().
+			Foreground(catRed).
+			Bold(true)
+
 	labelYellowStyle = lipgloss.NewStyle().
 				Foreground(catYellow).
 				Bold(true)
@@ -338,7 +342,7 @@ func main() {
 		m.viewport.SetContent(m.result + "\n\n" + m.err.Error())
 	}
 
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 
 	if _, err := p.Run(); err != nil {
 		fmt.Println("Error:", err)
@@ -543,6 +547,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 
 	case branchesLoadedMsg:
 		if msg.Err != nil {
@@ -782,6 +789,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.screen == screenResult || m.screen == screenHistory || m.screen == screenDiff {
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		return m, cmd
+	}
+
+	return m, nil
+}
+
+func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	steps := 0
+	switch msg.Type {
+	case tea.MouseWheelUp:
+		steps = -3
+	case tea.MouseWheelDown:
+		steps = 3
+	default:
+		return m, nil
+	}
+
+	switch m.screen {
+	case screenBranchSelect:
+		m.branchNumberInput = ""
+		m.branchCursor = clampInt(m.branchCursor+steps, 0, len(m.branches)-1)
+		m.branchOffset = adjustOffset(m.branchOffset, m.branchCursor, m.branchListVisibleCount())
+
+	case screenPullSelect:
+		m.commitCursor = clampInt(m.commitCursor+steps, 0, len(m.commitItems)-1)
+		m.commitOffset = adjustOffset(m.commitOffset, m.commitCursor, m.pullListVisibleCount())
+
+	case screenHistory, screenDiff, screenResult:
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		return m, cmd
@@ -1121,7 +1158,7 @@ func (m model) updateFileHistorySelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	visible := m.visibleListCount(10)
+	visible := m.branchListVisibleCount()
 	key := msg.String()
 
 	switch key {
@@ -1181,7 +1218,7 @@ func (m model) updateBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updatePullSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	visible := m.visibleListCount(12)
+	visible := m.pullListVisibleCount()
 	key := msg.String()
 
 	m.commitCursor = navigateCursor(m.commitCursor, len(m.commitItems), visible, key)
@@ -1742,7 +1779,7 @@ func (m model) viewBranchSelect() string {
 	}
 	b.WriteString(mutedStyle.Render("-----------------------") + "\n")
 
-	visible := m.visibleListCount(10)
+	visible := m.branchListVisibleCount()
 	end := min(len(m.branches), m.branchOffset+visible)
 
 	for i := m.branchOffset; i < end; i++ {
@@ -1786,7 +1823,7 @@ func (m model) viewPullSelect() string {
 	b.WriteString(textStyle.Render("Incoming repository changes:") + "\n")
 	b.WriteString(mutedStyle.Render("----------------------------") + "\n")
 
-	visible := m.visibleListCount(12)
+	visible := m.pullListVisibleCount()
 	end := min(len(m.commitItems), m.commitOffset+visible)
 
 	for i := m.commitOffset; i < end; i++ {
@@ -4072,7 +4109,7 @@ func renderRevisionTreeCommit(b *strings.Builder, commit revisionBranchCommit, p
 }
 
 func renderRevisionTreeNodeLabel(node *revisionBranchNode) string {
-	label := valueWhiteStyle.Render(node.Path)
+	label := labelRedStyle.Render(node.Path)
 	if node.CreatedRev > 0 {
 		created := fmt.Sprintf("created r%d", node.CreatedRev)
 		if strings.TrimSpace(node.CreatedDate) != "" {
@@ -5395,6 +5432,33 @@ func repoInfoHeader(title string, r repo) string {
 	b.WriteString("\n\n")
 
 	return b.String()
+}
+
+func (m model) branchListVisibleCount() int {
+	// Repo header + branch controls + footer take more space than the older
+	// rough estimate, especially with long repo URLs. Keep the selectable list
+	// inside the terminal so the offset/cursor scroll logic stays reliable.
+	return m.visibleListCount(14)
+}
+
+func (m model) pullListVisibleCount() int {
+	// Pull has the repo header, selected counter, title rows and help footer.
+	// Reserving enough lines prevents long incoming-change lists from spilling
+	// below the terminal instead of scrolling cleanly.
+	return m.visibleListCount(15)
+}
+
+func clampInt(v int, low int, high int) int {
+	if high < low {
+		return low
+	}
+	if v < low {
+		return low
+	}
+	if v > high {
+		return high
+	}
+	return v
 }
 
 func (m model) visibleListCount(reservedLines int) int {
