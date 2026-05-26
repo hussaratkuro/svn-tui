@@ -39,6 +39,7 @@ const (
 	screenFileHistorySearch
 	screenFileHistorySelect
 	screenHistory
+	screenHistorySearch
 	screenDiff
 	screenRunning
 	screenResult
@@ -80,6 +81,7 @@ type repo struct {
 	Password        string
 	BranchUsername  string
 	CurrentLocation string
+	CurrentRevision string
 }
 
 type branch struct {
@@ -106,6 +108,7 @@ type commandResult struct {
 	Err             error
 	CurrentLocation string
 	URL             string
+	CurrentRevision string
 }
 
 type branchesLoadedMsg struct {
@@ -225,10 +228,12 @@ type model struct {
 
 	viewport viewport.Model
 
-	historyTitle string
-	runningTitle string
-	result       string
-	err          error
+	historyTitle   string
+	historyContent string
+	historySearch  string
+	runningTitle   string
+	result         string
+	err            error
 }
 
 var (
@@ -285,8 +290,16 @@ var (
 			Foreground(catMauve).
 			Bold(true)
 
+	labelRedStyle = lipgloss.NewStyle().
+			Foreground(catRed).
+			Bold(true)
+
 	labelYellowStyle = lipgloss.NewStyle().
 				Foreground(catYellow).
+				Bold(true)
+
+	labelSapphireStyle = lipgloss.NewStyle().
+				Foreground(catSapphire).
 				Bold(true)
 
 	valueWhiteStyle = lipgloss.NewStyle().
@@ -517,6 +530,7 @@ func buildRepo(cfg repoConfig) (repo, error) {
 	r.Root = strings.TrimSpace(root)
 	r.URL = strings.TrimSpace(currentURL)
 	r.CurrentLocation = getCurrentLocation(r)
+	r.CurrentRevision = getCurrentRevision(r)
 
 	return r, nil
 }
@@ -720,11 +734,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if msg.Err != nil {
-			m.viewport.SetContent("Failed to load " + strings.ToLower(m.historyTitle) + ".\n\n" + msg.Output + "\n\n" + msg.Err.Error())
+			m.historyContent = "Failed to load " + strings.ToLower(m.historyTitle) + ".\n\n" + msg.Output + "\n\n" + msg.Err.Error()
 		} else {
-			m.viewport.SetContent(msg.Output)
+			m.historyContent = msg.Output
 		}
-
+		m.historySearch = ""
+		m.viewport.SetContent(m.historyContent)
 		m.viewport.GotoTop()
 		return m, nil
 
@@ -799,25 +814,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.result = msg.Output
 		m.err = msg.Err
 
-		if msg.CurrentLocation != "" {
-			m.activeRepo.CurrentLocation = msg.CurrentLocation
+		// After any command that can change the working copy (pull, commit, switch,
+		// merge, resolve, checkout, shelve/unshelve), refresh the visible repo state
+		// so the menu header never shows stale location/revision data.
+		location := firstNonEmpty(msg.CurrentLocation, getCurrentLocation(m.activeRepo))
+		currentURL := firstNonEmpty(msg.URL, getCurrentURL(m.activeRepo))
+		revision := firstNonEmpty(msg.CurrentRevision, getCurrentRevision(m.activeRepo))
 
-			for i := range m.repos {
-				if m.repos[i].Path == m.activeRepo.Path {
-					m.repos[i].CurrentLocation = msg.CurrentLocation
-					break
-				}
-			}
+		if location != "" {
+			m.activeRepo.CurrentLocation = location
 		}
 
-		if msg.URL != "" {
-			m.activeRepo.URL = msg.URL
+		if currentURL != "" {
+			m.activeRepo.URL = currentURL
+		}
 
-			for i := range m.repos {
-				if m.repos[i].Path == m.activeRepo.Path {
-					m.repos[i].URL = msg.URL
-					break
-				}
+		if revision != "" {
+			m.activeRepo.CurrentRevision = revision
+		}
+
+		for i := range m.repos {
+			if m.repos[i].Path == m.activeRepo.Path {
+				m.repos[i].CurrentLocation = m.activeRepo.CurrentLocation
+				m.repos[i].URL = m.activeRepo.URL
+				m.repos[i].CurrentRevision = m.activeRepo.CurrentRevision
+				break
 			}
 		}
 
@@ -892,6 +913,16 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 
+	case "/", "s":
+		if m.screen == screenHistory {
+			m.input.Reset()
+			m.input.Placeholder = "Revision number, e.g. 2225"
+			m.input.Focus()
+			m.result = ""
+			m.screen = screenHistorySearch
+			return m, nil
+		}
+
 	case "a":
 		if m.screen == screenHistory && m.selectedAction == actionRevisionTree {
 			m.screen = screenRunning
@@ -928,6 +959,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			} else {
 				m.screen = screenCommitSelect
 			}
+
+		case screenHistorySearch:
+			m.screen = screenHistory
 
 		case screenCreateBranchInput,
 			screenCheckoutRevisionInput,
@@ -996,6 +1030,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case screenConflictSelect:
 		return m.updateConflictSelect(msg)
 
+	case screenHistorySearch:
+		return m.updateHistorySearch(msg)
+
 	case screenResult:
 		if msg.String() == "enter" {
 			m.screen = screenActionSelect
@@ -1013,6 +1050,32 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) updateHistorySearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		query := strings.TrimSpace(m.input.Value())
+		m.historySearch = query
+		m.result = ""
+		m.screen = screenHistory
+		if query == "" {
+			return m, nil
+		}
+
+		line, ok := findRevisionLine(m.historyContent, query)
+		if !ok {
+			m.result = fmt.Sprintf("Revision r%s was not found in the currently loaded history.", strings.TrimPrefix(query, "r"))
+			return m, nil
+		}
+
+		m.viewport.YOffset = clampInt(line, 0, max(0, len(strings.Split(m.historyContent, "\n"))-1))
+		return m, nil
+	}
+
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
 func (m model) updateRepoSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	visible := m.visibleListCount(7)
 	key := msg.String()
@@ -1023,7 +1086,9 @@ func (m model) updateRepoSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		m.activeRepo = m.repos[m.repoCursor]
 		m.activeRepo.CurrentLocation = getCurrentLocation(m.activeRepo)
+		m.activeRepo.CurrentRevision = getCurrentRevision(m.activeRepo)
 		m.repos[m.repoCursor].CurrentLocation = m.activeRepo.CurrentLocation
+		m.repos[m.repoCursor].CurrentRevision = m.activeRepo.CurrentRevision
 
 		m.actionCursor = 0
 		m.actionOffset = 0
@@ -1769,7 +1834,7 @@ func (m model) View() string {
 	case screenConflictSelect:
 		return m.viewConflictSelect()
 
-	case screenHistory:
+	case screenHistory, screenHistorySearch:
 		return m.viewHistory()
 
 	case screenDiff:
@@ -2463,12 +2528,26 @@ func (m model) viewHistory() string {
 	}
 
 	b.WriteString(repoInfoHeader(title, m.activeRepo))
-	if m.selectedAction == actionRevisionTree {
-		b.WriteString(mutedStyle.Render("↑/↓: scroll | PgUp/PgDn: page | Home/End: jump | a: load full history | Esc: back | q: quit") + "\n\n")
+	if m.screen == screenHistorySearch {
+		b.WriteString(labelSapphireStyle.Render("Search revision: ") + m.input.View() + "\n")
+		b.WriteString(mutedStyle.Render("Enter: jump to revision | Esc: cancel") + "\n\n")
+	} else if m.selectedAction == actionRevisionTree {
+		b.WriteString(mutedStyle.Render("↑/↓: scroll | PgUp/PgDn: page | Home/End: jump | / or s: search revision | a: load full history | Esc: back | q: quit") + "\n")
+		if strings.TrimSpace(m.historySearch) != "" {
+			b.WriteString(mutedStyle.Render("Last search: r"+strings.TrimPrefix(strings.TrimSpace(m.historySearch), "r")) + "\n")
+		}
+		b.WriteString("\n")
 	} else {
-		b.WriteString(mutedStyle.Render("↑/↓: scroll | PgUp/PgDn: page | Home/End: jump | Esc: back | q: quit") + "\n\n")
+		b.WriteString(mutedStyle.Render("↑/↓: scroll | PgUp/PgDn: page | Home/End: jump | / or s: search revision | Esc: back | q: quit") + "\n")
+		if strings.TrimSpace(m.historySearch) != "" {
+			b.WriteString(mutedStyle.Render("Last search: r"+strings.TrimPrefix(strings.TrimSpace(m.historySearch), "r")) + "\n")
+		}
+		b.WriteString("\n")
 	}
 	b.WriteString(textStyle.Render(m.viewport.View()))
+	if strings.TrimSpace(m.result) != "" && strings.Contains(m.result, "was not found") {
+		b.WriteString("\n" + warningStyle.Render(m.result))
+	}
 
 	return b.String()
 }
@@ -2583,10 +2662,15 @@ func loadPullItemsCmd(r repo) tea.Cmd {
 }
 
 func loadPullItems(r repo) ([]commitItem, error) {
-	out, err := svn(r, "diff", "--summarize", "-r", "BASE:HEAD")
+	// Pull select must show only repository-side incoming updates.
+	// `svn diff --summarize -r BASE:HEAD` also reports local/mixed/special items in
+	// some working copies, which made the pull screen offer files even when the repo
+	// was already up to date. `svn status -u` is the reliable source here: only rows
+	// with `*` in the remote-update columns are actually incoming.
+	out, err := svn(r, "status", "-u")
 	if err != nil {
 		return nil, fmt.Errorf(
-			"svn incoming diff summary failed\n\nWorking copy: %s\n\nOutput:\n%s\n\nError: %w",
+			"svn status -u failed\n\nWorking copy: %s\n\nOutput:\n%s\n\nError: %w",
 			r.Path,
 			out,
 			err,
@@ -2595,23 +2679,10 @@ func loadPullItems(r repo) ([]commitItem, error) {
 
 	var items []commitItem
 	for _, line := range strings.Split(out, "\n") {
-		item, ok := parseSVNDiffSummaryLine(line)
+		item, ok := parseSVNStatusUpdateLine(line)
 		if ok {
 			item.Selected = false
 			items = append(items, item)
-		}
-	}
-
-	if len(items) == 0 {
-		statusOut, statusErr := svn(r, "status", "-u")
-		if statusErr == nil {
-			for _, line := range strings.Split(statusOut, "\n") {
-				item, ok := parseSVNStatusUpdateLine(line)
-				if ok {
-					item.Selected = false
-					items = append(items, item)
-				}
-			}
 		}
 	}
 
@@ -3375,6 +3446,28 @@ func mergeBranchCmd(r repo, branchName string) tea.Cmd {
 		output.WriteString("Source URL: " + branchURL + "\n")
 		output.WriteString("Target: current working copy\n")
 
+		versionText, versionErr := svnWorkingCopyVersion(r)
+		if versionErr == nil && isMixedRevisionWorkingCopy(versionText) {
+			output.WriteString("Working copy is mixed-revision (" + strings.TrimSpace(versionText) + ").\n")
+			output.WriteString("Running svn update first, because svn merge requires a single-revision working copy.\n\n")
+
+			updateOut, updateErr := svn(r, "update")
+			output.WriteString(updateOut)
+			if updateErr != nil {
+				return commandResult{
+					Output:          output.String(),
+					Err:             updateErr,
+					CurrentLocation: getCurrentLocation(r),
+					URL:             getCurrentURL(r),
+				}
+			}
+
+			output.WriteString("\nWorking copy updated. Continuing merge.\n\n")
+		} else if versionErr != nil {
+			output.WriteString("Could not check working copy revision with svnversion: " + versionErr.Error() + "\n")
+			output.WriteString("Continuing merge without automatic update.\n\n")
+		}
+
 		startRev, revOut, revErr := branchStartRevision(r, branchURL)
 		if strings.TrimSpace(revOut) != "" {
 			output.WriteString("\nRevision lookup output:\n" + revOut + "\n")
@@ -3432,6 +3525,26 @@ func mergeBranchCmd(r repo, branchName string) tea.Cmd {
 			URL:             getCurrentURL(r),
 		}
 	}
+}
+
+func svnWorkingCopyVersion(r repo) (string, error) {
+	cmd := exec.Command("svnversion", ".")
+	cmd.Dir = r.Path
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func isMixedRevisionWorkingCopy(versionText string) bool {
+	versionText = strings.TrimSpace(versionText)
+	if versionText == "" {
+		return false
+	}
+
+	if strings.Contains(strings.ToLower(versionText), "exported") || strings.Contains(strings.ToLower(versionText), "unversioned") {
+		return false
+	}
+
+	return strings.Contains(versionText, ":")
 }
 
 func branchStartRevision(r repo, branchURL string) (int, string, error) {
@@ -4260,6 +4373,30 @@ func colorizeUnifiedDiff(out string) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+func findRevisionLine(content string, query string) (int, bool) {
+	q := strings.TrimSpace(strings.ToLower(query))
+	q = strings.TrimPrefix(q, "r")
+	if q == "" {
+		return 0, false
+	}
+
+	revPattern := regexp.MustCompile(`(^|[^0-9])r?` + regexp.QuoteMeta(q) + `([^0-9]|$)`)
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		plain := stripANSI(line)
+		plainLower := strings.ToLower(plain)
+		if strings.Contains(plainLower, "r"+q) || revPattern.MatchString(plainLower) {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+func stripANSI(s string) string {
+	ansi := regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	return ansi.ReplaceAllString(s, "")
+}
+
 func loadHistoryCmd(r repo) tea.Cmd {
 	return func() tea.Msg {
 		out, err := svn(
@@ -4748,7 +4885,7 @@ func renderRevisionTreeMergeBack(b *strings.Builder, merge revisionMergeBack, pr
 	if last {
 		mergeConnector = "└⤴"
 	}
-	line := prefix + labelMauveStyle.Render(mergeConnector) + " " + diffModifiedStyle.Render("merged back") + " " + labelMauveStyle.Render("→") + " " + valueWhiteStyle.Render(merge.Target)
+	line := prefix + labelMauveStyle.Render(mergeConnector) + " " + labelSapphireStyle.Render("merged back") + " " + labelMauveStyle.Render("→") + " " + valueWhiteStyle.Render(merge.Target)
 	if merge.Rev > 0 {
 		line += " " + successStyle.Render(fmt.Sprintf("r%d", merge.Rev))
 	}
@@ -4778,7 +4915,7 @@ func renderRevisionTreeCommit(b *strings.Builder, commit revisionBranchCommit, p
 }
 
 func renderRevisionTreeNodeLabel(node *revisionBranchNode) string {
-	label := errorStyle.Render(node.Path)
+	label := labelRedStyle.Render(node.Path)
 	if node.CreatedRev > 0 {
 		created := fmt.Sprintf("created r%d", node.CreatedRev)
 		if strings.TrimSpace(node.CreatedDate) != "" {
@@ -4917,15 +5054,6 @@ func formatSVNLogDate(s string) string {
 	}
 
 	return s
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return "-"
 }
 
 func loadPartialHunksCmd(r repo, item commitItem) tea.Cmd {
@@ -6066,6 +6194,31 @@ func getCurrentLocation(r repo) string {
 	return location
 }
 
+func getCurrentRevision(r repo) string {
+	out, err := svnWorkingCopyVersion(r)
+	if err != nil {
+		return "unknown"
+	}
+
+	revision := strings.TrimSpace(out)
+	if revision == "" {
+		return "unknown"
+	}
+
+	return revision
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+
+	return ""
+}
+
 func repoInfoHeader(title string, r repo) string {
 	var b strings.Builder
 
@@ -6082,6 +6235,18 @@ func repoInfoHeader(title string, r repo) string {
 
 	b.WriteString(labelYellowStyle.Render("Current: "))
 	b.WriteString(valueWhiteStyle.Render(location))
+	b.WriteString("\n")
+
+	revision := strings.TrimSpace(r.CurrentRevision)
+	if revision == "" {
+		revision = getCurrentRevision(r)
+	}
+	if revision == "" {
+		revision = "unknown"
+	}
+
+	b.WriteString(labelYellowStyle.Render("Revision: "))
+	b.WriteString(valueWhiteStyle.Render(revision))
 	b.WriteString("\n")
 
 	if r.URL != "" {
