@@ -50,6 +50,7 @@ const (
 	actionCommit
 	actionCreateBranch
 	actionSwitchBranch
+	actionMergeBranch
 	actionSwitchTrunk
 	actionCheckoutRevision
 	actionResolveConflicts
@@ -317,6 +318,7 @@ func main() {
 			"Commit",
 			"Create branch",
 			"Switch to branch",
+			"Merge branch",
 			"Switch to trunk",
 			"Checkout revision",
 			"Resolve conflicts",
@@ -969,6 +971,11 @@ func (m model) updateActionSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.runningTitle = "Loading branches..."
 			return m, loadBranchesCmd(m.activeRepo)
 
+		case actionMergeBranch:
+			m.screen = screenRunning
+			m.runningTitle = "Loading branches..."
+			return m, loadBranchesCmd(m.activeRepo)
+
 		case actionSwitchTrunk:
 			m.screen = screenRunning
 			m.runningTitle = "Switching to trunk..."
@@ -1145,8 +1152,13 @@ func (m model) updateBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		selected := m.branches[selectedIndex]
 
 		m.screen = screenRunning
-		m.runningTitle = "Switching to branch..."
 		m.branchNumberInput = ""
+		if m.selectedAction == actionMergeBranch {
+			m.runningTitle = "Merging branch..."
+			return m, mergeBranchCmd(m.activeRepo, selected.Name)
+		}
+
+		m.runningTitle = "Switching to branch..."
 		return m, switchBranchCmd(m.activeRepo, selected.Name)
 
 	default:
@@ -1716,10 +1728,17 @@ func (m model) viewFileHistorySelect() string {
 func (m model) viewBranchSelect() string {
 	var b strings.Builder
 
-	b.WriteString(repoInfoHeader("Switch to branch", m.activeRepo))
+	title := "Switch to branch"
+	enterAction := "switch"
+	if m.selectedAction == actionMergeBranch {
+		title = "Merge branch"
+		enterAction = "merge"
+	}
+
+	b.WriteString(repoInfoHeader(title, m.activeRepo))
 	b.WriteString(textStyle.Render("Available SVN branches:") + "\n")
 	if strings.TrimSpace(m.branchNumberInput) != "" {
-		b.WriteString(labelYellowStyle.Render("Branch number: ") + valueWhiteStyle.Render(m.branchNumberInput) + mutedStyle.Render("  Enter: switch to this number | Backspace: edit") + "\n")
+		b.WriteString(labelYellowStyle.Render("Branch number: ") + valueWhiteStyle.Render(m.branchNumberInput) + mutedStyle.Render("  Enter: "+enterAction+" this number | Backspace: edit") + "\n")
 	}
 	b.WriteString(mutedStyle.Render("-----------------------") + "\n")
 
@@ -1743,7 +1762,7 @@ func (m model) viewBranchSelect() string {
 
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render(scrollHint(m.branchOffset, end, len(m.branches))) + "\n")
-	b.WriteString(mutedStyle.Render("↑/↓ or j/k: move | type number + Enter: switch | PgUp/PgDn: scroll | Esc: back"))
+	b.WriteString(mutedStyle.Render("↑/↓ or j/k: move | type number + Enter: " + enterAction + " | PgUp/PgDn: scroll | Esc: back"))
 
 	return b.String()
 }
@@ -2688,6 +2707,45 @@ func switchBranchCmd(r repo, branchName string) tea.Cmd {
 
 		if err == nil {
 			output.WriteString("\nSwitched to branch " + branchName + " successfully.")
+		}
+
+		return commandResult{
+			Output:          output.String(),
+			Err:             err,
+			CurrentLocation: getCurrentLocation(r),
+			URL:             getCurrentURL(r),
+		}
+	}
+}
+
+func mergeBranchCmd(r repo, branchName string) tea.Cmd {
+	return func() tea.Msg {
+		branchURL := r.Root + "/branches/" + branchName
+
+		var output strings.Builder
+
+		currentURL, _ := svn(r, "info", "--show-item", "url")
+		currentLocation := getCurrentLocation(r)
+
+		output.WriteString("Working copy: " + r.Path + "\n")
+		output.WriteString("Current location: " + currentLocation + "\n")
+		output.WriteString("Current URL: " + strings.TrimSpace(currentURL) + "\n")
+		output.WriteString("Merging branch: " + branchName + "\n")
+		output.WriteString("Source URL: " + branchURL + "\n")
+		output.WriteString("Target: current working copy\n\n")
+
+		out, err := svn(
+			r,
+			"merge",
+			branchURL,
+			".",
+		)
+
+		output.WriteString(out)
+
+		if err == nil {
+			output.WriteString("\nBranch " + branchName + " merged into the current working copy successfully.")
+			output.WriteString("\nReview the changes, resolve conflicts if needed, then commit manually.")
 		}
 
 		return commandResult{
