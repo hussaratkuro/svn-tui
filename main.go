@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"net/url"
@@ -27,6 +28,8 @@ const (
 	screenCreateBranchInput
 	screenCheckoutRevisionInput
 	screenBranchSelect
+	screenShelfSelect
+	screenShelveSelect
 	screenPullSelect
 	screenCommitSelect
 	screenCommitMessageInput
@@ -51,6 +54,8 @@ const (
 	actionCreateBranch
 	actionSwitchBranch
 	actionMergeBranch
+	actionShelveChanges
+	actionUnshelveChanges
 	actionSwitchTrunk
 	actionCheckoutRevision
 	actionResolveConflicts
@@ -106,6 +111,12 @@ type commandResult struct {
 type branchesLoadedMsg struct {
 	Branches []branch
 	Err      error
+}
+
+type shelvesLoadedMsg struct {
+	Shelves []string
+	Err     error
+	Output  string
 }
 
 type pullItemsLoadedMsg struct {
@@ -186,6 +197,10 @@ type model struct {
 	branchCursor      int
 	branchOffset      int
 	branchNumberInput string
+
+	shelves     []string
+	shelfCursor int
+	shelfOffset int
 
 	fileHistoryQuery  string
 	fileHistoryItems  []string
@@ -270,10 +285,6 @@ var (
 			Foreground(catMauve).
 			Bold(true)
 
-	labelRedStyle = lipgloss.NewStyle().
-			Foreground(catRed).
-			Bold(true)
-
 	labelYellowStyle = lipgloss.NewStyle().
 				Foreground(catYellow).
 				Bold(true)
@@ -323,6 +334,8 @@ func main() {
 			"Create branch",
 			"Switch to branch",
 			"Merge branch",
+			"Shelve local changes",
+			"Unshelve changes",
 			"Switch to trunk",
 			"Checkout revision",
 			"Resolve conflicts",
@@ -567,6 +580,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = screenBranchSelect
 		return m, nil
 
+	case shelvesLoadedMsg:
+		if msg.Err != nil {
+			m.screen = screenResult
+			m.err = msg.Err
+			m.result = "Failed to load shelves."
+			content := m.result
+			if strings.TrimSpace(msg.Output) != "" {
+				content += "\n\n" + msg.Output
+			}
+			content += "\n\n" + msg.Err.Error()
+			m.viewport.SetContent(content)
+			return m, nil
+		}
+
+		if len(msg.Shelves) == 0 {
+			m.screen = screenResult
+			m.err = nil
+			m.result = "No shelves found."
+			if strings.TrimSpace(msg.Output) != "" {
+				m.result += "\n\n" + msg.Output
+			}
+			m.viewport.SetContent(m.result)
+			return m, nil
+		}
+
+		m.shelves = msg.Shelves
+		m.shelfCursor = 0
+		m.shelfOffset = 0
+		m.screen = screenShelfSelect
+		return m, nil
+
 	case pullItemsLoadedMsg:
 		if msg.Err != nil {
 			m.screen = screenResult
@@ -625,7 +669,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(msg.Items) == 0 {
 			m.screen = screenResult
 			m.err = nil
-			m.result = "No revertable changes found."
+			if m.selectedAction == actionShelveChanges {
+				m.result = "No local changes found to shelve."
+			} else {
+				m.result = "No revertable changes found."
+			}
 			m.viewport.SetContent(m.result)
 			return m, nil
 		}
@@ -633,7 +681,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.commitItems = msg.Items
 		m.commitCursor = 0
 		m.commitOffset = 0
-		m.screen = screenRevertSelect
+		if m.selectedAction == actionShelveChanges {
+			m.screen = screenShelveSelect
+		} else {
+			m.screen = screenRevertSelect
+		}
 		return m, nil
 
 	case conflictItemsLoadedMsg:
@@ -814,9 +866,17 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.branchCursor = clampInt(m.branchCursor+steps, 0, len(m.branches)-1)
 		m.branchOffset = adjustOffset(m.branchOffset, m.branchCursor, m.branchListVisibleCount())
 
+	case screenShelfSelect:
+		m.shelfCursor = clampInt(m.shelfCursor+steps, 0, len(m.shelves)-1)
+		m.shelfOffset = adjustOffset(m.shelfOffset, m.shelfCursor, m.visibleListCount(7))
+
 	case screenPullSelect:
 		m.commitCursor = clampInt(m.commitCursor+steps, 0, len(m.commitItems)-1)
 		m.commitOffset = adjustOffset(m.commitOffset, m.commitCursor, m.pullListVisibleCount())
+
+	case screenShelveSelect:
+		m.commitCursor = clampInt(m.commitCursor+steps, 0, len(m.commitItems)-1)
+		m.commitOffset = adjustOffset(m.commitOffset, m.commitCursor, m.visibleListCount(12))
 
 	case screenHistory, screenDiff, screenResult:
 		var cmd tea.Cmd
@@ -863,6 +923,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.screen = screenPullSelect
 			} else if m.selectedAction == actionRevertFiles {
 				m.screen = screenRevertSelect
+			} else if m.selectedAction == actionShelveChanges {
+				m.screen = screenShelveSelect
 			} else {
 				m.screen = screenCommitSelect
 			}
@@ -872,7 +934,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			screenFileHistorySearch,
 			screenFileHistorySelect,
 			screenBranchSelect,
+			screenShelfSelect,
 			screenPullSelect,
+			screenShelveSelect,
 			screenCommitSelect,
 			screenCommitMessageInput,
 			screenPartialHunkSelect,
@@ -908,8 +972,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case screenBranchSelect:
 		return m.updateBranchSelect(msg)
 
+	case screenShelfSelect:
+		return m.updateShelfSelect(msg)
+
 	case screenPullSelect:
 		return m.updatePullSelect(msg)
+
+	case screenShelveSelect:
+		return m.updateShelveSelect(msg)
 
 	case screenCommitSelect:
 		return m.updateCommitSelect(msg)
@@ -1012,6 +1082,16 @@ func (m model) updateActionSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = screenRunning
 			m.runningTitle = "Loading branches..."
 			return m, loadBranchesCmd(m.activeRepo)
+
+		case actionShelveChanges:
+			m.screen = screenRunning
+			m.runningTitle = "Loading local changes to shelve..."
+			return m, loadShelveItemsCmd(m.activeRepo)
+
+		case actionUnshelveChanges:
+			m.screen = screenRunning
+			m.runningTitle = "Loading shelves..."
+			return m, loadShelvesCmd(m.activeRepo)
 
 		case actionSwitchTrunk:
 			m.screen = screenRunning
@@ -1213,6 +1293,29 @@ func (m model) updateBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	m.branchOffset = adjustOffset(m.branchOffset, m.branchCursor, visible)
+
+	return m, nil
+}
+
+func (m model) updateShelfSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visible := m.visibleListCount(7)
+	key := msg.String()
+
+	m.shelfCursor = navigateCursor(m.shelfCursor, len(m.shelves), visible, key)
+
+	switch key {
+	case "enter":
+		if len(m.shelves) == 0 {
+			return m, nil
+		}
+
+		selected := m.shelves[m.shelfCursor]
+		m.screen = screenRunning
+		m.runningTitle = "Unshelving changes..."
+		return m, unshelveChangesCmd(m.activeRepo, selected)
+	}
+
+	m.shelfOffset = adjustOffset(m.shelfOffset, m.shelfCursor, visible)
 
 	return m, nil
 }
@@ -1445,6 +1548,66 @@ func (m model) updatePartialHunkSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) updateShelveSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visible := m.visibleListCount(12)
+	key := msg.String()
+
+	m.commitCursor = navigateCursor(m.commitCursor, len(m.commitItems), visible, key)
+
+	switch key {
+	case " ":
+		if len(m.commitItems) > 0 {
+			m.commitItems[m.commitCursor].Selected = !m.commitItems[m.commitCursor].Selected
+		}
+
+	case "a":
+		for i := range m.commitItems {
+			m.commitItems[i].Selected = true
+		}
+
+	case "n":
+		for i := range m.commitItems {
+			m.commitItems[i].Selected = false
+		}
+
+	case "d":
+		if len(m.commitItems) == 0 {
+			return m, nil
+		}
+
+		item := m.commitItems[m.commitCursor]
+		if item.Unversioned || strings.HasPrefix(strings.TrimSpace(item.Status), "?") {
+			m.screen = screenResult
+			m.err = fmt.Errorf("diff is not available for unversioned files")
+			m.result = "This file is unversioned, so SVN has no base version to compare against."
+			m.viewport.SetContent(m.result + "\n\n" + m.err.Error())
+			return m, nil
+		}
+
+		m.screen = screenRunning
+		m.runningTitle = "Loading side-by-side diff..."
+		return m, diffCmd(m.activeRepo, item, m.width)
+
+	case "enter":
+		items := selectedCommitItems(m.commitItems)
+		if len(items) == 0 {
+			m.screen = screenResult
+			m.err = fmt.Errorf("no files selected")
+			m.result = "Select at least one file with Space before shelving."
+			m.viewport.SetContent(m.result + "\n\n" + m.err.Error())
+			return m, nil
+		}
+
+		m.screen = screenRunning
+		m.runningTitle = "Shelving selected files..."
+		return m, shelveChangesCmd(m.activeRepo, items)
+	}
+
+	m.commitOffset = adjustOffset(m.commitOffset, m.commitCursor, visible)
+
+	return m, nil
+}
+
 func (m model) updateRevertSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	visible := m.visibleListCount(12)
 	key := msg.String()
@@ -1582,8 +1745,14 @@ func (m model) View() string {
 	case screenBranchSelect:
 		return m.viewBranchSelect()
 
+	case screenShelfSelect:
+		return m.viewShelfSelect()
+
 	case screenPullSelect:
 		return m.viewPullSelect()
+
+	case screenShelveSelect:
+		return m.viewShelveSelect()
 
 	case screenCommitSelect:
 		return m.viewCommitSelect()
@@ -1637,19 +1806,6 @@ func (m model) viewRepoSelect() string {
 
 		line := fmt.Sprintf("%s %s", cursor, r.Path)
 		b.WriteString(lineStyle.Render(line) + "\n")
-		b.WriteString(labelYellowStyle.Render("    URL: ") + valueWhiteStyle.Render(r.URL) + "\n")
-		b.WriteString(labelYellowStyle.Render("    Root: ") + valueWhiteStyle.Render(r.Root) + "\n")
-
-		if r.CurrentLocation != "" {
-			b.WriteString(labelYellowStyle.Render("    Current: ") + valueWhiteStyle.Render(r.CurrentLocation) + "\n")
-		}
-
-		if r.Username != "" {
-			b.WriteString(mutedStyle.Render("    User: "+r.Username) + "\n")
-		}
-		if r.BranchUsername != "" {
-			b.WriteString(mutedStyle.Render("    Branch user: "+r.BranchUsername) + "\n")
-		}
 	}
 
 	b.WriteString("\n")
@@ -1804,6 +1960,38 @@ func (m model) viewBranchSelect() string {
 	return b.String()
 }
 
+func (m model) viewShelfSelect() string {
+	var b strings.Builder
+
+	b.WriteString(repoInfoHeader("Unshelve changes", m.activeRepo))
+	b.WriteString(textStyle.Render("Available shelves:") + "\n")
+	b.WriteString(mutedStyle.Render("-----------------") + "\n")
+
+	visible := m.visibleListCount(7)
+	end := min(len(m.shelves), m.shelfOffset+visible)
+
+	for i := m.shelfOffset; i < end; i++ {
+		shelf := m.shelves[i]
+
+		cursor := " "
+		lineStyle := normalStyle
+
+		if i == m.shelfCursor {
+			cursor = ">"
+			lineStyle = selectedStyle
+		}
+
+		line := fmt.Sprintf("%s %s", cursor, shelf)
+		b.WriteString(lineStyle.Render(line) + "\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render(scrollHint(m.shelfOffset, end, len(m.shelves))) + "\n")
+	b.WriteString(mutedStyle.Render("↑/↓ or j/k: move | PgUp/PgDn: scroll | Enter: unshelve | Esc: back"))
+
+	return b.String()
+}
+
 func (m model) viewPullSelect() string {
 	var b strings.Builder
 
@@ -1877,6 +2065,57 @@ func (m model) viewPullSelect() string {
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render(scrollHint(m.commitOffset, end, len(m.commitItems))) + "\n")
 	b.WriteString(mutedStyle.Render("Space: select/dir | a: all | n: none | d: diff | Enter: pull selected | Esc: back"))
+
+	return b.String()
+}
+
+func (m model) viewShelveSelect() string {
+	var b strings.Builder
+
+	selectedCount := len(selectedCommitItems(m.commitItems))
+	unversionedCount := len(selectedUnversionedCommitPaths(m.commitItems))
+
+	b.WriteString(repoInfoHeader("Shelve local changes", m.activeRepo))
+	b.WriteString(mutedStyle.Render(fmt.Sprintf("Selected files: %d | Selected unversioned files that will be copied into the shelf: %d", selectedCount, unversionedCount)) + "\n\n")
+	b.WriteString(textStyle.Render("Working copy changes:") + "\n")
+	b.WriteString(mutedStyle.Render("---------------------") + "\n")
+
+	visible := m.visibleListCount(12)
+	end := min(len(m.commitItems), m.commitOffset+visible)
+
+	for i := m.commitOffset; i < end; i++ {
+		item := m.commitItems[i]
+
+		cursor := " "
+		lineStyle := normalStyle
+
+		if i == m.commitCursor {
+			cursor = ">"
+			lineStyle = selectedStyle
+		}
+
+		check := checkboxStyle.Render("[ ]")
+		if item.Selected {
+			check = checkedStyle.Render("[x]")
+		}
+
+		status := item.Status
+		if item.Unversioned {
+			status = "? copy"
+		}
+
+		line := fmt.Sprintf("%s %s %-8s %s", cursor, check, status, item.Path)
+
+		if item.Selected && i != m.commitCursor {
+			b.WriteString(checkedStyle.Render(line) + "\n")
+		} else {
+			b.WriteString(lineStyle.Render(line) + "\n")
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(mutedStyle.Render(scrollHint(m.commitOffset, end, len(m.commitItems))) + "\n")
+	b.WriteString(mutedStyle.Render("Space: select | a: all | n: none | d: diff | Enter: shelve selected | Esc: back"))
 
 	return b.String()
 }
@@ -2513,6 +2752,17 @@ func loadRevertItemsCmd(r repo) tea.Cmd {
 	}
 }
 
+func loadShelveItemsCmd(r repo) tea.Cmd {
+	return func() tea.Msg {
+		items, err := loadCommitItems(r, true)
+
+		return revertItemsLoadedMsg{
+			Items: items,
+			Err:   err,
+		}
+	}
+}
+
 func loadCommitItems(r repo, includeUnversioned bool) ([]commitItem, error) {
 	out, err := svn(r, "status")
 	if err != nil {
@@ -2755,6 +3005,360 @@ func switchBranchCmd(r repo, branchName string) tea.Cmd {
 	}
 }
 
+func shelveChangesCmd(r repo, items []commitItem) tea.Cmd {
+	return func() tea.Msg {
+		var output strings.Builder
+
+		selected := selectedCommitItems(items)
+		if len(selected) == 0 {
+			return commandResult{
+				Output:          "Select at least one file with Space before shelving.",
+				Err:             fmt.Errorf("no files selected"),
+				CurrentLocation: getCurrentLocation(r),
+				URL:             getCurrentURL(r),
+			}
+		}
+
+		shelfName := "auto-" + time.Now().Format("20060102-150405")
+		shelfDir := filepath.Join(r.Path, ".svn-tui-shelves", shelfName)
+		filesDir := filepath.Join(shelfDir, "files")
+		patchPath := filepath.Join(shelfDir, "changes.patch")
+		manifestPath := filepath.Join(shelfDir, "manifest.json")
+
+		currentURL, _ := svn(r, "info", "--show-item", "url")
+		currentLocation := getCurrentLocation(r)
+
+		output.WriteString("Working copy: " + r.Path + "\n")
+		output.WriteString("Current location: " + currentLocation + "\n")
+		output.WriteString("Current URL: " + strings.TrimSpace(currentURL) + "\n")
+		output.WriteString("Custom SVN TUI shelve\n")
+		output.WriteString("Shelf name: " + shelfName + "\n")
+		output.WriteString("Shelf path: " + shelfDir + "\n\n")
+		output.WriteString("Selected files:\n")
+		for _, item := range selected {
+			output.WriteString("  " + item.Status + " " + item.Path + "\n")
+		}
+
+		if err := os.MkdirAll(filesDir, 0700); err != nil {
+			return commandResult{Output: output.String(), Err: err, CurrentLocation: getCurrentLocation(r), URL: getCurrentURL(r)}
+		}
+
+		versionedPaths := make([]string, 0)
+		unversionedPaths := make([]string, 0)
+		for _, item := range selected {
+			if item.Unversioned || strings.HasPrefix(strings.TrimSpace(item.Status), "?") {
+				unversionedPaths = append(unversionedPaths, item.Path)
+			} else {
+				versionedPaths = append(versionedPaths, item.Path)
+			}
+		}
+
+		patchContent := ""
+		if len(versionedPaths) > 0 {
+			args := []string{"diff"}
+			args = append(args, versionedPaths...)
+			out, err := svn(r, args...)
+			patchContent = out
+			if err != nil {
+				return commandResult{
+					Output:          output.String() + "\n\nsvn diff failed:\n" + out,
+					Err:             err,
+					CurrentLocation: getCurrentLocation(r),
+					URL:             getCurrentURL(r),
+				}
+			}
+		}
+
+		if err := os.WriteFile(patchPath, []byte(patchContent), 0600); err != nil {
+			return commandResult{Output: output.String(), Err: err, CurrentLocation: getCurrentLocation(r), URL: getCurrentURL(r)}
+		}
+
+		manifest := shelfManifest{
+			Name:             shelfName,
+			CreatedAt:        time.Now().Format(time.RFC3339),
+			WorkingCopy:      r.Path,
+			URL:              strings.TrimSpace(currentURL),
+			CurrentLocation:  currentLocation,
+			VersionedPaths:   versionedPaths,
+			UnversionedPaths: unversionedPaths,
+		}
+
+		for _, relPath := range unversionedPaths {
+			src := filepath.Join(r.Path, filepath.FromSlash(relPath))
+			dst := filepath.Join(filesDir, filepath.FromSlash(relPath))
+			if err := copyPath(src, dst); err != nil {
+				return commandResult{Output: output.String(), Err: fmt.Errorf("copy unversioned file %s failed: %w", relPath, err), CurrentLocation: getCurrentLocation(r), URL: getCurrentURL(r)}
+			}
+		}
+
+		manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
+		if err != nil {
+			return commandResult{Output: output.String(), Err: err, CurrentLocation: getCurrentLocation(r), URL: getCurrentURL(r)}
+		}
+		if err := os.WriteFile(manifestPath, manifestBytes, 0600); err != nil {
+			return commandResult{Output: output.String(), Err: err, CurrentLocation: getCurrentLocation(r), URL: getCurrentURL(r)}
+		}
+
+		if len(versionedPaths) > 0 {
+			output.WriteString("\nReverting selected versioned files after saving patch...\n\n")
+			args := []string{"revert"}
+			args = append(args, versionedPaths...)
+			out, err := svn(r, args...)
+			output.WriteString(out)
+			if err != nil {
+				return commandResult{Output: output.String(), Err: err, CurrentLocation: getCurrentLocation(r), URL: getCurrentURL(r)}
+			}
+		}
+
+		for _, relPath := range unversionedPaths {
+			fullPath := filepath.Join(r.Path, filepath.FromSlash(relPath))
+			if err := os.RemoveAll(fullPath); err != nil {
+				return commandResult{Output: output.String(), Err: fmt.Errorf("remove unversioned file %s failed: %w", relPath, err), CurrentLocation: getCurrentLocation(r), URL: getCurrentURL(r)}
+			}
+		}
+
+		output.WriteString("\nShelve finished successfully.")
+		output.WriteString("\nUse 'Unshelve changes' to restore shelf: " + shelfName)
+		output.WriteString("\n\nNote: this is a custom SVN TUI shelf stored in .svn-tui-shelves, because this SVN client does not support 'svn shelve'.")
+
+		return commandResult{
+			Output:          output.String(),
+			Err:             nil,
+			CurrentLocation: getCurrentLocation(r),
+			URL:             getCurrentURL(r),
+		}
+	}
+}
+
+type shelfManifest struct {
+	Name             string   `json:"name"`
+	CreatedAt        string   `json:"created_at"`
+	WorkingCopy      string   `json:"working_copy"`
+	URL              string   `json:"url"`
+	CurrentLocation  string   `json:"current_location"`
+	VersionedPaths   []string `json:"versioned_paths"`
+	UnversionedPaths []string `json:"unversioned_paths"`
+}
+
+func loadShelvesCmd(r repo) tea.Cmd {
+	return func() tea.Msg {
+		shelvesRoot := filepath.Join(r.Path, ".svn-tui-shelves")
+		entries, err := os.ReadDir(shelvesRoot)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return shelvesLoadedMsg{Shelves: nil, Err: nil, Output: ""}
+			}
+			return shelvesLoadedMsg{Err: err, Output: "Failed to read custom shelves directory: " + shelvesRoot}
+		}
+
+		var shelves []string
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			manifestPath := filepath.Join(shelvesRoot, entry.Name(), "manifest.json")
+			if _, err := os.Stat(manifestPath); err == nil {
+				shelves = append(shelves, entry.Name())
+			}
+		}
+
+		sort.Sort(sort.Reverse(sort.StringSlice(shelves)))
+		return shelvesLoadedMsg{Shelves: shelves, Err: nil, Output: ""}
+	}
+}
+
+func unshelveChangesCmd(r repo, shelfName string) tea.Cmd {
+	return func() tea.Msg {
+		var output strings.Builder
+
+		shelfDir := filepath.Join(r.Path, ".svn-tui-shelves", shelfName)
+		filesDir := filepath.Join(shelfDir, "files")
+		patchPath := filepath.Join(shelfDir, "changes.patch")
+		manifestPath := filepath.Join(shelfDir, "manifest.json")
+
+		currentURL, _ := svn(r, "info", "--show-item", "url")
+		currentLocation := getCurrentLocation(r)
+
+		output.WriteString("Working copy: " + r.Path + "\n")
+		output.WriteString("Current location: " + currentLocation + "\n")
+		output.WriteString("Current URL: " + strings.TrimSpace(currentURL) + "\n")
+		output.WriteString("Custom SVN TUI unshelve\n")
+		output.WriteString("Shelf name: " + shelfName + "\n\n")
+
+		manifestBytes, err := os.ReadFile(manifestPath)
+		if err != nil {
+			return commandResult{Output: output.String(), Err: err, CurrentLocation: getCurrentLocation(r), URL: getCurrentURL(r)}
+		}
+
+		var manifest shelfManifest
+		if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+			return commandResult{Output: output.String(), Err: err, CurrentLocation: getCurrentLocation(r), URL: getCurrentURL(r)}
+		}
+
+		patchBytes, err := os.ReadFile(patchPath)
+		if err != nil {
+			return commandResult{Output: output.String(), Err: err, CurrentLocation: getCurrentLocation(r), URL: getCurrentURL(r)}
+		}
+
+		if strings.TrimSpace(string(patchBytes)) != "" {
+			output.WriteString("Applying saved patch...\n\n")
+			out, err := svnPatchFile(r, patchPath)
+			output.WriteString(out)
+			if err != nil {
+				return commandResult{
+					Output:          output.String(),
+					Err:             err,
+					CurrentLocation: getCurrentLocation(r),
+					URL:             getCurrentURL(r),
+				}
+			}
+		}
+
+		for _, relPath := range manifest.UnversionedPaths {
+			src := filepath.Join(filesDir, filepath.FromSlash(relPath))
+			dst := filepath.Join(r.Path, filepath.FromSlash(relPath))
+			if err := copyPath(src, dst); err != nil {
+				return commandResult{Output: output.String(), Err: fmt.Errorf("restore unversioned file %s failed: %w", relPath, err), CurrentLocation: getCurrentLocation(r), URL: getCurrentURL(r)}
+			}
+		}
+
+		if err := os.RemoveAll(shelfDir); err != nil {
+			output.WriteString("\nWarning: shelf was restored, but removing shelf directory failed: " + err.Error())
+		} else {
+			output.WriteString("\nShelf restored and removed from custom shelves.")
+		}
+
+		if removed, err := removeShelvesRootIfEmpty(r); err != nil {
+			output.WriteString("\nWarning: checking custom shelves directory failed: " + err.Error())
+		} else if removed {
+			output.WriteString("\nAll shelves are restored, .svn-tui-shelves was removed.")
+		}
+
+		output.WriteString("\nRun Status/Diff to review the working copy.")
+
+		return commandResult{
+			Output:          output.String(),
+			Err:             nil,
+			CurrentLocation: getCurrentLocation(r),
+			URL:             getCurrentURL(r),
+		}
+	}
+}
+
+func removeShelvesRootIfEmpty(r repo) (bool, error) {
+	shelvesRoot := filepath.Join(r.Path, ".svn-tui-shelves")
+	entries, err := os.ReadDir(shelvesRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	if len(entries) > 0 {
+		return false, nil
+	}
+
+	if err := os.Remove(shelvesRoot); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+func svnPatchFile(r repo, patchPath string) (string, error) {
+	out, err := svn(r, "patch", patchPath)
+	if err == nil {
+		return out, nil
+	}
+
+	cmd := exec.Command("patch", "-p0", "-i", patchPath)
+	cmd.Dir = r.Path
+	fallbackOut, fallbackErr := cmd.CombinedOutput()
+	if fallbackErr == nil {
+		return out + string(fallbackOut), nil
+	}
+
+	return out + string(fallbackOut), fmt.Errorf("svn patch failed: %w; fallback patch failed: %v", err, fallbackErr)
+}
+
+func copyPath(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+
+	if info.IsDir() {
+		return copyDir(src, dst)
+	}
+
+	return copyFile(src, dst, info.Mode())
+}
+
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+		return copyFile(path, target, info.Mode())
+	})
+}
+
+func copyFile(src, dst string, mode os.FileMode) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, mode)
+}
+
+func parseShelves(out string) []string {
+	seen := map[string]bool{}
+	var shelves []string
+
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		lower := strings.ToLower(line)
+		if strings.HasPrefix(lower, "shelves") || strings.HasPrefix(lower, "name") || strings.HasPrefix(lower, "---") {
+			continue
+		}
+		if strings.Contains(lower, "no shelves") || strings.Contains(lower, "no shelf") {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+
+		name := strings.Trim(fields[0], "*:")
+		if name == "" || seen[name] {
+			continue
+		}
+
+		seen[name] = true
+		shelves = append(shelves, name)
+	}
+
+	return shelves
+}
+
 func mergeBranchCmd(r repo, branchName string) tea.Cmd {
 	return func() tea.Msg {
 		branchURL := r.Root + "/branches/" + branchName
@@ -2769,12 +3373,48 @@ func mergeBranchCmd(r repo, branchName string) tea.Cmd {
 		output.WriteString("Current URL: " + strings.TrimSpace(currentURL) + "\n")
 		output.WriteString("Merging branch: " + branchName + "\n")
 		output.WriteString("Source URL: " + branchURL + "\n")
-		output.WriteString("Target: current working copy\n\n")
+		output.WriteString("Target: current working copy\n")
+
+		startRev, revOut, revErr := branchStartRevision(r, branchURL)
+		if strings.TrimSpace(revOut) != "" {
+			output.WriteString("\nRevision lookup output:\n" + revOut + "\n")
+		}
+		if revErr != nil {
+			output.WriteString("\nCould not detect branch start revision automatically: " + revErr.Error())
+			output.WriteString("\nFallback merge mode: snapshot merge with --ignore-ancestry.\n\n")
+
+			out, err := svn(
+				r,
+				"merge",
+				"--ignore-ancestry",
+				branchURL,
+				".",
+			)
+			output.WriteString(out)
+
+			if err == nil {
+				output.WriteString("\nBranch " + branchName + " merged into the current working copy successfully.")
+				output.WriteString("\nReview the changes, resolve conflicts if needed, then commit manually.")
+			}
+
+			return commandResult{
+				Output:          output.String(),
+				Err:             err,
+				CurrentLocation: getCurrentLocation(r),
+				URL:             getCurrentURL(r),
+			}
+		}
+
+		revisionRange := fmt.Sprintf("%d:HEAD", startRev)
+		output.WriteString("Merge mode: all branch revisions into current working copy\n")
+		output.WriteString("Revision range: " + revisionRange + "\n\n")
 
 		out, err := svn(
 			r,
 			"merge",
-			branchURL,
+			"-r",
+			revisionRange,
+			branchURL+"@HEAD",
 			".",
 		)
 
@@ -2792,6 +3432,35 @@ func mergeBranchCmd(r repo, branchName string) tea.Cmd {
 			URL:             getCurrentURL(r),
 		}
 	}
+}
+
+func branchStartRevision(r repo, branchURL string) (int, string, error) {
+	out, err := svn(r, "log", "--xml", "--stop-on-copy", "-v", branchURL)
+	if err != nil {
+		return 0, out, err
+	}
+
+	var parsed svnLogXML
+	if err := xml.Unmarshal([]byte(out), &parsed); err != nil {
+		return 0, "", err
+	}
+
+	if len(parsed.Entries) == 0 {
+		return 0, "", fmt.Errorf("no svn log entries found for branch")
+	}
+
+	oldest := parsed.Entries[0].Revision
+	for _, entry := range parsed.Entries {
+		if entry.Revision > 0 && (oldest == 0 || entry.Revision < oldest) {
+			oldest = entry.Revision
+		}
+	}
+
+	if oldest <= 0 {
+		return 0, "", fmt.Errorf("invalid branch start revision")
+	}
+
+	return oldest, "", nil
 }
 
 func switchTrunkCmd(r repo) tea.Cmd {
@@ -4109,7 +4778,7 @@ func renderRevisionTreeCommit(b *strings.Builder, commit revisionBranchCommit, p
 }
 
 func renderRevisionTreeNodeLabel(node *revisionBranchNode) string {
-	label := labelRedStyle.Render(node.Path)
+	label := errorStyle.Render(node.Path)
 	if node.CreatedRev > 0 {
 		created := fmt.Sprintf("created r%d", node.CreatedRev)
 		if strings.TrimSpace(node.CreatedDate) != "" {
