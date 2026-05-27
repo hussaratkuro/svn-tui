@@ -23,6 +23,10 @@ import (
 type screen int
 
 const (
+	svnTUIShelvesDir = ".svn-tui-shelves"
+)
+
+const (
 	screenRepoSelect screen = iota
 	screenActionSelect
 	screenCreateBranchInput
@@ -109,6 +113,21 @@ type commandResult struct {
 	CurrentLocation string
 	URL             string
 	CurrentRevision string
+}
+
+// svnStreamItem is passed through the streaming channel. When done is true the
+// result field carries the final commandResult; otherwise line holds one output line.
+type svnStreamItem struct {
+	line   string
+	done   bool
+	result commandResult
+}
+
+// streamOutputMsg is a BubbleTea message carrying one live output line together
+// with the channel to read the next item from.
+type streamOutputMsg struct {
+	line string
+	ch   <-chan svnStreamItem
 }
 
 type branchesLoadedMsg struct {
@@ -231,9 +250,10 @@ type model struct {
 	historyTitle   string
 	historyContent string
 	historySearch  string
-	runningTitle   string
-	result         string
-	err            error
+	runningTitle string
+	runningLines []string
+	result       string
+	err          error
 }
 
 var (
@@ -255,7 +275,7 @@ var (
 			MarginBottom(1)
 
 	selectedStyle = lipgloss.NewStyle().
-			Foreground(catYellow).
+			Foreground(catMauve).
 			Bold(true)
 
 	mutedStyle = lipgloss.NewStyle().
@@ -809,7 +829,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = screenPartialHunkSelect
 		return m, nil
 
+	case streamOutputMsg:
+		m.runningLines = append(m.runningLines, msg.line)
+		return m, readNextSVNStream(msg.ch)
+
 	case commandResult:
+		m.runningLines = nil // clear streaming lines; result screen uses viewport
 		m.screen = screenResult
 		m.result = msg.Output
 		m.err = msg.Err
@@ -2060,8 +2085,8 @@ func (m model) viewShelfSelect() string {
 func (m model) viewPullSelect() string {
 	var b strings.Builder
 
-	totalFiles := 0
 	selectedFiles := 0
+	totalFiles := 0
 	for _, item := range m.commitItems {
 		if !item.IsDir {
 			totalFiles++
@@ -2081,13 +2106,11 @@ func (m model) viewPullSelect() string {
 
 	for i := m.commitOffset; i < end; i++ {
 		item := m.commitItems[i]
+		isCursor := i == m.commitCursor
 
 		cursor := " "
-		lineStyle := normalStyle
-
-		if i == m.commitCursor {
+		if isCursor {
 			cursor = ">"
-			lineStyle = selectedStyle
 		}
 
 		if item.IsDir {
@@ -2102,28 +2125,52 @@ func (m model) viewPullSelect() string {
 					allSel = false
 				}
 			}
-			dirCheck := checkboxStyle.Render("[ ]")
+
+			dirCheckText := "[ ]"
 			if count > 0 && allSel {
-				dirCheck = checkedStyle.Render("[x]")
+				dirCheckText = "[x]"
 			} else if anySel {
-				dirCheck = mutedStyle.Render("[-]")
+				dirCheckText = "[-]"
+			}
+
+			if isCursor {
+				line := fmt.Sprintf("%s %s %s", cursor, dirCheckText, item.Path)
+				b.WriteString(selectedStyle.Render(line) + "\n")
+				continue
+			}
+
+			dirCheck := checkboxStyle.Render(dirCheckText)
+			if dirCheckText == "[x]" {
+				dirCheck = checkedStyle.Render(dirCheckText)
+			} else if dirCheckText == "[-]" {
+				dirCheck = mutedStyle.Render(dirCheckText)
 			}
 			line := fmt.Sprintf("%s %s ", cursor, dirCheck) + labelMauveStyle.Render(item.Path)
-			b.WriteString(lineStyle.Render(line) + "\n")
+			b.WriteString(normalStyle.Render(line) + "\n")
+			continue
+		}
+
+		checkText := "[ ]"
+		if item.Selected {
+			checkText = "[x]"
+		}
+
+		if isCursor {
+			line := fmt.Sprintf("%s %s %s %s", cursor, checkText, item.Status, item.Path)
+			b.WriteString(selectedStyle.Render(line) + "\n")
+			continue
+		}
+
+		check := checkboxStyle.Render(checkText)
+		if item.Selected {
+			check = checkedStyle.Render(checkText)
+		}
+		status := colorizePullStatus(item.Status)
+		if item.Selected {
+			b.WriteString(checkedStyle.Render(fmt.Sprintf("%s %s ", cursor, checkText)) + status + " " + valueWhiteStyle.Render(item.Path) + "\n")
 		} else {
-			check := checkboxStyle.Render("[ ]")
-			if item.Selected {
-				check = checkedStyle.Render("[x]")
-			}
-
-			status := colorizePullStatus(item.Status)
 			line := fmt.Sprintf("%s %s ", cursor, check) + status + " " + valueWhiteStyle.Render(item.Path)
-
-			if item.Selected && i != m.commitCursor {
-				b.WriteString(checkedStyle.Render(fmt.Sprintf("%s %s ", cursor, "[x]")) + status + " " + valueWhiteStyle.Render(item.Path) + "\n")
-			} else {
-				b.WriteString(lineStyle.Render(line) + "\n")
-			}
+			b.WriteString(normalStyle.Render(line) + "\n")
 		}
 	}
 
@@ -2150,18 +2197,16 @@ func (m model) viewShelveSelect() string {
 
 	for i := m.commitOffset; i < end; i++ {
 		item := m.commitItems[i]
+		isCursor := i == m.commitCursor
 
 		cursor := " "
-		lineStyle := normalStyle
-
-		if i == m.commitCursor {
+		if isCursor {
 			cursor = ">"
-			lineStyle = selectedStyle
 		}
 
-		check := checkboxStyle.Render("[ ]")
+		checkText := "[ ]"
 		if item.Selected {
-			check = checkedStyle.Render("[x]")
+			checkText = "[x]"
 		}
 
 		status := item.Status
@@ -2169,12 +2214,21 @@ func (m model) viewShelveSelect() string {
 			status = "? copy"
 		}
 
-		line := fmt.Sprintf("%s %s %-8s %s", cursor, check, status, item.Path)
+		if isCursor {
+			line := fmt.Sprintf("%s %s %-8s %s", cursor, checkText, status, item.Path)
+			b.WriteString(selectedStyle.Render(line) + "\n")
+			continue
+		}
 
-		if item.Selected && i != m.commitCursor {
+		check := checkboxStyle.Render(checkText)
+		if item.Selected {
+			check = checkedStyle.Render(checkText)
+		}
+		line := fmt.Sprintf("%s %s %-8s %s", cursor, check, status, item.Path)
+		if item.Selected {
 			b.WriteString(checkedStyle.Render(line) + "\n")
 		} else {
-			b.WriteString(lineStyle.Render(line) + "\n")
+			b.WriteString(normalStyle.Render(line) + "\n")
 		}
 	}
 
@@ -2201,18 +2255,16 @@ func (m model) viewCommitSelect() string {
 
 	for i := m.commitOffset; i < end; i++ {
 		item := m.commitItems[i]
+		isCursor := i == m.commitCursor
 
 		cursor := " "
-		lineStyle := normalStyle
-
-		if i == m.commitCursor {
+		if isCursor {
 			cursor = ">"
-			lineStyle = selectedStyle
 		}
 
-		check := checkboxStyle.Render("[ ]")
+		checkText := "[ ]"
 		if item.Selected {
-			check = checkedStyle.Render("[x]")
+			checkText = "[x]"
 		}
 
 		status := item.Status
@@ -2220,12 +2272,21 @@ func (m model) viewCommitSelect() string {
 			status = "? add"
 		}
 
-		line := fmt.Sprintf("%s %s %-8s %s", cursor, check, status, item.Path)
+		if isCursor {
+			line := fmt.Sprintf("%s %s %-8s %s", cursor, checkText, status, item.Path)
+			b.WriteString(selectedStyle.Render(line) + "\n")
+			continue
+		}
 
-		if item.Selected && i != m.commitCursor {
+		check := checkboxStyle.Render(checkText)
+		if item.Selected {
+			check = checkedStyle.Render(checkText)
+		}
+		line := fmt.Sprintf("%s %s %-8s %s", cursor, check, status, item.Path)
+		if item.Selected {
 			b.WriteString(checkedStyle.Render(line) + "\n")
 		} else {
-			b.WriteString(lineStyle.Render(line) + "\n")
+			b.WriteString(normalStyle.Render(line) + "\n")
 		}
 	}
 
@@ -2262,32 +2323,40 @@ func (m model) viewPartialHunkSelect() string {
 
 	for i := m.partialHunkOffset; i < end; i++ {
 		hunk := m.partialHunks[i]
+		isCursor := i == m.partialHunkCursor
 
 		cursor := " "
-		lineStyle := normalStyle
-
-		if i == m.partialHunkCursor {
+		if isCursor {
 			cursor = ">"
-			lineStyle = selectedStyle
 		}
 
-		check := checkboxStyle.Render("[ ]")
+		checkText := "[ ]"
 		if hunk.Selected {
-			check = checkedStyle.Render("[x]")
+			checkText = "[x]"
 		}
 
-		addInfo := diffAddedStyle.Render(fmt.Sprintf("+%d", hunk.Added))
-		removeInfo := diffDeletedStyle.Render(fmt.Sprintf("-%d", hunk.Removed))
-		headerText := hunk.Header
-		if hunk.Added > 0 && hunk.Removed > 0 {
-			headerText = diffModifiedStyle.Render(headerText)
-		}
-
-		summary := fmt.Sprintf("%s %s hunk %d  %s  %s %s", cursor, check, i+1, headerText, addInfo, removeInfo)
-		if hunk.Selected && i != m.partialHunkCursor {
-			b.WriteString(checkedStyle.Render(summary) + "\n")
+		if isCursor {
+			summary := fmt.Sprintf("%s %s hunk %d  %s  +%d -%d", cursor, checkText, i+1, hunk.Header, hunk.Added, hunk.Removed)
+			b.WriteString(selectedStyle.Render(summary) + "\n")
 		} else {
-			b.WriteString(lineStyle.Render(summary) + "\n")
+			check := checkboxStyle.Render(checkText)
+			if hunk.Selected {
+				check = checkedStyle.Render(checkText)
+			}
+
+			addInfo := diffAddedStyle.Render(fmt.Sprintf("+%d", hunk.Added))
+			removeInfo := diffDeletedStyle.Render(fmt.Sprintf("-%d", hunk.Removed))
+			headerText := hunk.Header
+			if hunk.Added > 0 && hunk.Removed > 0 {
+				headerText = diffModifiedStyle.Render(headerText)
+			}
+
+			summary := fmt.Sprintf("%s %s hunk %d  %s  %s %s", cursor, check, i+1, headerText, addInfo, removeInfo)
+			if hunk.Selected {
+				b.WriteString(checkedStyle.Render(summary) + "\n")
+			} else {
+				b.WriteString(normalStyle.Render(summary) + "\n")
+			}
 		}
 
 		for _, previewLine := range renderPartialHunkPreview(hunk, 8) {
@@ -2318,32 +2387,39 @@ func (m model) viewRevertSelect() string {
 
 	for i := m.commitOffset; i < end; i++ {
 		item := m.commitItems[i]
+		isCursor := i == m.commitCursor
 
 		cursor := " "
-		lineStyle := normalStyle
-
-		if i == m.commitCursor {
+		if isCursor {
 			cursor = ">"
-			lineStyle = selectedStyle
 		}
 
-		check := checkboxStyle.Render("[ ]")
+		checkText := "[ ]"
 		if item.Selected {
-			check = checkedStyle.Render("[x]")
+			checkText = "[x]"
 		}
 
-		line := fmt.Sprintf("%s %s %-8s %s", cursor, check, item.Status, item.Path)
+		if isCursor {
+			line := fmt.Sprintf("%s %s %-8s %s", cursor, checkText, item.Status, item.Path)
+			b.WriteString(selectedStyle.Render(line) + "\n")
+			continue
+		}
 
-		if item.Selected && i != m.commitCursor {
+		check := checkboxStyle.Render(checkText)
+		if item.Selected {
+			check = checkedStyle.Render(checkText)
+		}
+		line := fmt.Sprintf("%s %s %-8s %s", cursor, check, item.Status, item.Path)
+		if item.Selected {
 			b.WriteString(checkedStyle.Render(line) + "\n")
 		} else {
-			b.WriteString(lineStyle.Render(line) + "\n")
+			b.WriteString(normalStyle.Render(line) + "\n")
 		}
 	}
 
 	b.WriteString("\n")
 	b.WriteString(mutedStyle.Render(scrollHint(m.commitOffset, end, len(m.commitItems))) + "\n")
-	b.WriteString(mutedStyle.Render("Space: select | a: all | n: none | d: side-by-side diff | Enter: revert selected | Esc: back"))
+	b.WriteString(mutedStyle.Render("Space: select | a: all | n: none | d: diff | Enter: revert selected | Esc: back"))
 
 	return b.String()
 }
@@ -2564,8 +2640,22 @@ func (m model) viewDiff() string {
 }
 
 func (m model) viewRunning() string {
-	return repoInfoHeader(m.runningTitle, m.activeRepo) +
-		mutedStyle.Render("SVN is working. It may grumble a little.")
+	var b strings.Builder
+	b.WriteString(repoInfoHeader(m.runningTitle, m.activeRepo))
+
+	if len(m.runningLines) == 0 {
+		b.WriteString(mutedStyle.Render("SVN is working. It may grumble a little."))
+		return b.String()
+	}
+
+	// Show the last N lines that fit in the terminal.
+	available := m.visibleListCount(6)
+	start := max(0, len(m.runningLines)-available)
+	for _, line := range m.runningLines[start:] {
+		b.WriteString(line + "\n")
+	}
+
+	return b.String()
 }
 
 func (m model) viewResult() string {
@@ -2804,6 +2894,9 @@ func colorizePullStatus(status string) string {
 func loadCommitItemsCmd(r repo) tea.Cmd {
 	return func() tea.Msg {
 		items, err := loadCommitItems(r, true)
+		if err == nil {
+			items = filterSelectFilesOnly(r, items)
+		}
 
 		return commitItemsLoadedMsg{
 			Items: items,
@@ -2815,6 +2908,9 @@ func loadCommitItemsCmd(r repo) tea.Cmd {
 func loadRevertItemsCmd(r repo) tea.Cmd {
 	return func() tea.Msg {
 		items, err := loadCommitItems(r, false)
+		if err == nil {
+			items = filterSelectFilesOnly(r, items)
+		}
 
 		return revertItemsLoadedMsg{
 			Items: items,
@@ -2849,39 +2945,11 @@ func loadCommitItems(r repo, includeUnversioned bool) ([]commitItem, error) {
 
 	lines := strings.Split(out, "\n")
 	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
+		item, ok := parseSVNLocalChangeStatusLine(r, line, includeUnversioned)
+		if !ok {
 			continue
 		}
-
-		status := ""
-		path := ""
-
-		if len(line) >= 8 {
-			status = strings.TrimSpace(line[:8])
-			path = strings.TrimSpace(line[8:])
-		} else {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				status = fields[0]
-				path = fields[len(fields)-1]
-			}
-		}
-
-		if status == "" || path == "" {
-			continue
-		}
-
-		unversioned := strings.HasPrefix(status, "?")
-		if unversioned && !includeUnversioned {
-			continue
-		}
-
-		items = append(items, commitItem{
-			Status:      status,
-			Path:        path,
-			Selected:    false,
-			Unversioned: unversioned,
-		})
+		items = append(items, item)
 	}
 
 	sort.Slice(items, func(i, j int) bool {
@@ -2893,6 +2961,84 @@ func loadCommitItems(r repo, includeUnversioned bool) ([]commitItem, error) {
 	})
 
 	return items, nil
+}
+
+func parseSVNLocalChangeStatusLine(r repo, line string, includeUnversioned bool) (commitItem, bool) {
+	if strings.TrimSpace(line) == "" {
+		return commitItem{}, false
+	}
+
+	textStatus := byte(' ')
+	propStatus := byte(' ')
+	if len(line) > 0 {
+		textStatus = line[0]
+	}
+	if len(line) > 1 {
+		propStatus = line[1]
+	}
+
+	path := ""
+	if len(line) >= 9 {
+		path = strings.TrimSpace(line[8:])
+	} else {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			path = fields[len(fields)-1]
+		}
+	}
+
+	path = strings.TrimPrefix(filepath.ToSlash(path), "./")
+	if path == "" || shouldHideFromCommitSelect(path) {
+		return commitItem{}, false
+	}
+
+	unversioned := textStatus == '?'
+	if unversioned && !includeUnversioned {
+		return commitItem{}, false
+	}
+
+	// Only the first two SVN status columns represent committable/revertable local
+	// changes. Other columns, for example the switched marker "S", are useful
+	// metadata, but they are not standalone file changes and made the commit list
+	// show files with no visible diff.
+	textChanged := strings.ContainsRune("MADRC!~", rune(textStatus))
+	propsChanged := propStatus == 'M' || propStatus == 'C'
+	if !unversioned && !textChanged && !propsChanged {
+		return commitItem{}, false
+	}
+
+	status := strings.TrimSpace(line[:min(len(line), 8)])
+	if status == "" {
+		status = string(textStatus)
+	}
+
+	return commitItem{
+		Status:      status,
+		Path:        path,
+		Selected:    false,
+		Unversioned: unversioned,
+		IsDir:       isSVNDirectory(r, path),
+	}, true
+}
+
+func shouldHideFromCommitSelect(path string) bool {
+	clean := strings.TrimSpace(filepath.ToSlash(path))
+	clean = strings.TrimPrefix(clean, "./")
+
+	return clean == "." || clean == svnTUIShelvesDir || strings.HasPrefix(clean, svnTUIShelvesDir+"/")
+}
+
+func filterSelectFilesOnly(r repo, items []commitItem) []commitItem {
+	filtered := make([]commitItem, 0, len(items))
+	for _, item := range items {
+		// Keep unversioned items even if they are directories: svn add works
+		// recursively on directories, so the user must be able to select them.
+		if !item.Unversioned && (item.IsDir || isSVNDirectory(r, item.Path)) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
 }
 
 func loadConflictItemsCmd(r repo) tea.Cmd {
@@ -2976,11 +3122,11 @@ func isTreeConflict(r repo, path string) bool {
 }
 
 func createBranchCmd(r repo, parameter string) tea.Cmd {
-	return func() tea.Msg {
+	return startStreamingCommand(func(emit func(string)) commandResult {
 		branchName, err := buildBranchName(r, parameter)
 		if err != nil {
 			return commandResult{
-				Output:          "Failed to build branch name.",
+				Output:          "Failed to build branch name.\n\n" + err.Error(),
 				Err:             err,
 				CurrentLocation: getCurrentLocation(r),
 			}
@@ -2991,20 +3137,20 @@ func createBranchCmd(r repo, parameter string) tea.Cmd {
 
 		var output strings.Builder
 
-		output.WriteString("Working copy: " + r.Path + "\n")
-		output.WriteString("Repository root: " + r.Root + "\n")
-		output.WriteString("Branch name: " + branchName + "\n\n")
+		line := func(s string) {
+			output.WriteString(s + "\n")
+			emit(s)
+		}
 
-		copyOut, err := svn(
-			r,
-			"copy",
-			trunkURL,
-			branchURL,
-			"-m",
-			"Creating branch "+branchName,
-		)
+		line("Working copy: " + r.Path)
+		line("Repository root: " + r.Root)
+		line("Branch name: " + branchName)
+		line("")
 
-		output.WriteString(copyOut)
+		err = svnStreamLines(r, func(raw string) {
+			output.WriteString(raw + "\n")
+			emit(raw)
+		}, "copy", trunkURL, branchURL, "-m", "Creating branch "+branchName)
 
 		if err != nil {
 			return commandResult{
@@ -3014,16 +3160,15 @@ func createBranchCmd(r repo, parameter string) tea.Cmd {
 			}
 		}
 
-		output.WriteString("\nSwitching to created branch...\n\n")
+		line("")
+		line("Switching to created branch...")
+		line("")
 
-		switchOut, err := svn(
-			r,
-			"switch",
-			"--ignore-ancestry",
-			branchURL,
-		)
-
-		output.WriteString(switchOut)
+		err = svnStreamLines(r, func(raw string) {
+			colored := colorizeSVNUpdateLine(raw)
+			output.WriteString(colored + "\n")
+			emit(colored)
+		}, "switch", "--ignore-ancestry", branchURL)
 
 		if err != nil {
 			return commandResult{
@@ -3033,7 +3178,8 @@ func createBranchCmd(r repo, parameter string) tea.Cmd {
 			}
 		}
 
-		output.WriteString("\nBranch " + branchName + " created and switched to successfully.")
+		line("")
+		line("Branch " + branchName + " created and switched to successfully.")
 
 		return commandResult{
 			Output:          output.String(),
@@ -3041,30 +3187,34 @@ func createBranchCmd(r repo, parameter string) tea.Cmd {
 			CurrentLocation: getCurrentLocation(r),
 			URL:             getCurrentURL(r),
 		}
-	}
+	})
 }
 
 func switchBranchCmd(r repo, branchName string) tea.Cmd {
-	return func() tea.Msg {
+	return startStreamingCommand(func(emit func(string)) commandResult {
 		branchURL := r.Root + "/branches/" + branchName
 
 		var output strings.Builder
 
-		output.WriteString("Working copy: " + r.Path + "\n")
-		output.WriteString("Switching to branch: " + branchName + "\n")
-		output.WriteString("Target URL: " + branchURL + "\n\n")
+		line := func(s string) {
+			output.WriteString(s + "\n")
+			emit(s)
+		}
 
-		out, err := svn(
-			r,
-			"switch",
-			"--ignore-ancestry",
-			branchURL,
-		)
+		line("Working copy: " + r.Path)
+		line("Switching to branch: " + branchName)
+		line("Target URL: " + branchURL)
+		line("")
 
-		output.WriteString(out)
+		err := svnStreamLines(r, func(raw string) {
+			colored := colorizeSVNUpdateLine(raw)
+			output.WriteString(colored + "\n")
+			emit(colored)
+		}, "switch", "--ignore-ancestry", branchURL)
 
 		if err == nil {
-			output.WriteString("\nSwitched to branch " + branchName + " successfully.")
+			line("")
+			line("Switched to branch " + branchName + " successfully.")
 		}
 
 		return commandResult{
@@ -3073,7 +3223,7 @@ func switchBranchCmd(r repo, branchName string) tea.Cmd {
 			CurrentLocation: getCurrentLocation(r),
 			URL:             getCurrentURL(r),
 		}
-	}
+	})
 }
 
 func shelveChangesCmd(r repo, items []commitItem) tea.Cmd {
@@ -3431,29 +3581,40 @@ func parseShelves(out string) []string {
 }
 
 func mergeBranchCmd(r repo, branchName string) tea.Cmd {
-	return func() tea.Msg {
+	return startStreamingCommand(func(emit func(string)) commandResult {
 		branchURL := r.Root + "/branches/" + branchName
 
 		var output strings.Builder
 
+		line := func(s string) {
+			output.WriteString(s + "\n")
+			emit(s)
+		}
+
+		streamSVN := func(args ...string) error {
+			return svnStreamLines(r, func(raw string) {
+				output.WriteString(raw + "\n")
+				emit(raw)
+			}, args...)
+		}
+
 		currentURL, _ := svn(r, "info", "--show-item", "url")
 		currentLocation := getCurrentLocation(r)
 
-		output.WriteString("Working copy: " + r.Path + "\n")
-		output.WriteString("Current location: " + currentLocation + "\n")
-		output.WriteString("Current URL: " + strings.TrimSpace(currentURL) + "\n")
-		output.WriteString("Merging branch: " + branchName + "\n")
-		output.WriteString("Source URL: " + branchURL + "\n")
-		output.WriteString("Target: current working copy\n")
+		line("Working copy: " + r.Path)
+		line("Current location: " + currentLocation)
+		line("Current URL: " + strings.TrimSpace(currentURL))
+		line("Merging branch: " + branchName)
+		line("Source URL: " + branchURL)
+		line("Target: current working copy")
 
 		versionText, versionErr := svnWorkingCopyVersion(r)
 		if versionErr == nil && isMixedRevisionWorkingCopy(versionText) {
-			output.WriteString("Working copy is mixed-revision (" + strings.TrimSpace(versionText) + ").\n")
-			output.WriteString("Running svn update first, because svn merge requires a single-revision working copy.\n\n")
+			line("Working copy is mixed-revision (" + strings.TrimSpace(versionText) + ").")
+			line("Running svn update first, because svn merge requires a single-revision working copy.")
+			line("")
 
-			updateOut, updateErr := svn(r, "update")
-			output.WriteString(updateOut)
-			if updateErr != nil {
+			if updateErr := streamSVN("update"); updateErr != nil {
 				return commandResult{
 					Output:          output.String(),
 					Err:             updateErr,
@@ -3462,32 +3623,35 @@ func mergeBranchCmd(r repo, branchName string) tea.Cmd {
 				}
 			}
 
-			output.WriteString("\nWorking copy updated. Continuing merge.\n\n")
+			line("")
+			line("Working copy updated. Continuing merge.")
+			line("")
 		} else if versionErr != nil {
-			output.WriteString("Could not check working copy revision with svnversion: " + versionErr.Error() + "\n")
-			output.WriteString("Continuing merge without automatic update.\n\n")
+			line("Could not check working copy revision with svnversion: " + versionErr.Error())
+			line("Continuing merge without automatic update.")
+			line("")
 		}
 
 		startRev, revOut, revErr := branchStartRevision(r, branchURL)
 		if strings.TrimSpace(revOut) != "" {
-			output.WriteString("\nRevision lookup output:\n" + revOut + "\n")
+			line("")
+			line("Revision lookup output:")
+			for _, l := range strings.Split(strings.TrimRight(revOut, "\n"), "\n") {
+				line(l)
+			}
 		}
 		if revErr != nil {
-			output.WriteString("\nCould not detect branch start revision automatically: " + revErr.Error())
-			output.WriteString("\nFallback merge mode: snapshot merge with --ignore-ancestry.\n\n")
+			line("")
+			line("Could not detect branch start revision automatically: " + revErr.Error())
+			line("Fallback merge mode: snapshot merge with --ignore-ancestry.")
+			line("")
 
-			out, err := svn(
-				r,
-				"merge",
-				"--ignore-ancestry",
-				branchURL,
-				".",
-			)
-			output.WriteString(out)
+			err := streamSVN("merge", "--ignore-ancestry", branchURL, ".")
 
 			if err == nil {
-				output.WriteString("\nBranch " + branchName + " merged into the current working copy successfully.")
-				output.WriteString("\nReview the changes, resolve conflicts if needed, then commit manually.")
+				line("")
+				line("Branch " + branchName + " merged into the current working copy successfully.")
+				line("Review the changes, resolve conflicts if needed, then commit manually.")
 			}
 
 			return commandResult{
@@ -3499,23 +3663,16 @@ func mergeBranchCmd(r repo, branchName string) tea.Cmd {
 		}
 
 		revisionRange := fmt.Sprintf("%d:HEAD", startRev)
-		output.WriteString("Merge mode: all branch revisions into current working copy\n")
-		output.WriteString("Revision range: " + revisionRange + "\n\n")
+		line("Merge mode: all branch revisions into current working copy")
+		line("Revision range: " + revisionRange)
+		line("")
 
-		out, err := svn(
-			r,
-			"merge",
-			"-r",
-			revisionRange,
-			branchURL+"@HEAD",
-			".",
-		)
-
-		output.WriteString(out)
+		err := streamSVN("merge", "-r", revisionRange, branchURL+"@HEAD", ".")
 
 		if err == nil {
-			output.WriteString("\nBranch " + branchName + " merged into the current working copy successfully.")
-			output.WriteString("\nReview the changes, resolve conflicts if needed, then commit manually.")
+			line("")
+			line("Branch " + branchName + " merged into the current working copy successfully.")
+			line("Review the changes, resolve conflicts if needed, then commit manually.")
 		}
 
 		return commandResult{
@@ -3524,7 +3681,7 @@ func mergeBranchCmd(r repo, branchName string) tea.Cmd {
 			CurrentLocation: getCurrentLocation(r),
 			URL:             getCurrentURL(r),
 		}
-	}
+	})
 }
 
 func svnWorkingCopyVersion(r repo) (string, error) {
@@ -3577,29 +3734,33 @@ func branchStartRevision(r repo, branchURL string) (int, string, error) {
 }
 
 func switchTrunkCmd(r repo) tea.Cmd {
-	return func() tea.Msg {
+	return startStreamingCommand(func(emit func(string)) commandResult {
 		trunkURL := r.Root + "/trunk"
 
 		var output strings.Builder
 
+		line := func(s string) {
+			output.WriteString(s + "\n")
+			emit(s)
+		}
+
 		currentURL, _ := svn(r, "info", "--show-item", "url")
 
-		output.WriteString("Working copy: " + r.Path + "\n")
-		output.WriteString("Current URL: " + strings.TrimSpace(currentURL) + "\n")
-		output.WriteString("Switching to trunk\n")
-		output.WriteString("Target URL: " + trunkURL + "\n\n")
+		line("Working copy: " + r.Path)
+		line("Current URL: " + strings.TrimSpace(currentURL))
+		line("Switching to trunk")
+		line("Target URL: " + trunkURL)
+		line("")
 
-		out, err := svn(
-			r,
-			"switch",
-			"--ignore-ancestry",
-			trunkURL,
-		)
-
-		output.WriteString(out)
+		err := svnStreamLines(r, func(raw string) {
+			colored := colorizeSVNUpdateLine(raw)
+			output.WriteString(colored + "\n")
+			emit(colored)
+		}, "switch", "--ignore-ancestry", trunkURL)
 
 		if err == nil {
-			output.WriteString("\nSwitched back to trunk successfully.")
+			line("")
+			line("Switched back to trunk successfully.")
 		}
 
 		return commandResult{
@@ -3608,47 +3769,58 @@ func switchTrunkCmd(r repo) tea.Cmd {
 			CurrentLocation: getCurrentLocation(r),
 			URL:             getCurrentURL(r),
 		}
-	}
+	})
 }
 
 func pullCmd(r repo, paths []string) tea.Cmd {
-	return func() tea.Msg {
+	return startStreamingCommand(func(emit func(string)) commandResult {
 		var output strings.Builder
+
+		line := func(s string) {
+			output.WriteString(s + "\n")
+			emit(s)
+		}
 
 		currentURL, _ := svn(r, "info", "--show-item", "url")
 
-		output.WriteString("Working copy: " + r.Path + "\n")
-		output.WriteString("Current URL: " + strings.TrimSpace(currentURL) + "\n")
+		line("Working copy: " + r.Path)
+		line("Current URL: " + strings.TrimSpace(currentURL))
 
 		if r.Username != "" {
-			output.WriteString("Auth user: " + r.Username + "\n")
+			line("Auth user: " + r.Username)
 		} else {
-			output.WriteString("Auth user: NOT SET\n")
+			line("Auth user: NOT SET")
 		}
 
 		if r.Password != "" {
-			output.WriteString("Auth password: SET\n")
+			line("Auth password: SET")
 		} else {
-			output.WriteString("Auth password: NOT SET\n")
+			line("Auth password: NOT SET")
 		}
 
 		args := []string{"update"}
 		if len(paths) > 0 {
 			args = append(args, paths...)
-			output.WriteString("Selected paths:\n")
+			line("Selected paths:")
 			for _, path := range paths {
-				output.WriteString("  " + path + "\n")
+				line("  " + path)
 			}
 		} else {
-			output.WriteString("Updating all files in working copy.\n")
+			line("Updating all files in working copy.")
 		}
-		output.WriteString("\nRunning: svn " + strings.Join(args, " ") + "\n\n")
+		line("")
+		line("Running: svn " + strings.Join(args, " "))
+		line("")
 
-		out, err := svn(r, args...)
-		output.WriteString(colorizeSVNUpdateOutput(out))
+		err := svnStreamLines(r, func(raw string) {
+			colored := colorizeSVNUpdateLine(raw)
+			output.WriteString(colored + "\n")
+			emit(colored)
+		}, args...)
 
 		if err == nil {
-			output.WriteString("\nPull finished successfully.")
+			line("")
+			line("Pull finished successfully.")
 		}
 
 		return commandResult{
@@ -3656,7 +3828,7 @@ func pullCmd(r repo, paths []string) tea.Cmd {
 			Err:             err,
 			CurrentLocation: getCurrentLocation(r),
 		}
-	}
+	})
 }
 
 func statusCmd(r repo) tea.Cmd {
@@ -3695,22 +3867,32 @@ func statusCmd(r repo) tea.Cmd {
 }
 
 func checkoutRevisionCmd(r repo, revision string) tea.Cmd {
-	return func() tea.Msg {
+	return startStreamingCommand(func(emit func(string)) commandResult {
 		var output strings.Builder
+
+		line := func(s string) {
+			output.WriteString(s + "\n")
+			emit(s)
+		}
 
 		currentURL, _ := svn(r, "info", "--show-item", "url")
 
-		output.WriteString("Working copy: " + r.Path + "\n")
-		output.WriteString("Current URL: " + strings.TrimSpace(currentURL) + "\n")
-		output.WriteString("Target revision: " + revision + "\n")
-		output.WriteString("Running: svn update -r " + revision + "\n\n")
+		line("Working copy: " + r.Path)
+		line("Current URL: " + strings.TrimSpace(currentURL))
+		line("Target revision: " + revision)
+		line("Running: svn update -r " + revision)
+		line("")
 
-		out, err := svn(r, "update", "-r", revision)
-		output.WriteString(out)
+		err := svnStreamLines(r, func(raw string) {
+			colored := colorizeSVNUpdateLine(raw)
+			output.WriteString(colored + "\n")
+			emit(colored)
+		}, "update", "-r", revision)
 
 		if err == nil {
-			output.WriteString("\nWorking copy updated to revision " + revision + ".")
-			output.WriteString("\nUse Pull to update back to HEAD.")
+			line("")
+			line("Working copy updated to revision " + revision + ".")
+			line("Use Pull to update back to HEAD.")
 		}
 
 		return commandResult{
@@ -3718,36 +3900,45 @@ func checkoutRevisionCmd(r repo, revision string) tea.Cmd {
 			Err:             err,
 			CurrentLocation: getCurrentLocation(r),
 		}
-	}
+	})
 }
 
 func commitCmd(r repo, items []commitItem, message string) tea.Cmd {
-	return func() tea.Msg {
+	return startStreamingCommand(func(emit func(string)) commandResult {
 		var output strings.Builder
+
+		line := func(s string) {
+			output.WriteString(s + "\n")
+			emit(s)
+		}
 
 		paths := commitItemPaths(items)
 		unversionedPaths := unversionedItemPaths(items)
 
-		output.WriteString("Working copy: " + r.Path + "\n")
-		output.WriteString("Commit message: " + message + "\n")
-		output.WriteString("Selected files:\n")
+		line("Working copy: " + r.Path)
+		line("Commit message: " + message)
+		line("Selected files:")
 
 		for _, item := range items {
 			prefix := "  "
 			if item.Unversioned {
 				prefix = "  + "
 			}
-			output.WriteString(prefix + item.Path + "\n")
+			line(prefix + item.Path)
 		}
 
 		if len(unversionedPaths) > 0 {
-			output.WriteString("\nAdding selected unversioned files before commit...\n\n")
+			line("")
+			line("Adding selected unversioned files before commit...")
+			line("")
 
 			addArgs := []string{"add", "--parents"}
 			addArgs = append(addArgs, unversionedPaths...)
 
 			addOut, err := svn(r, addArgs...)
-			output.WriteString(addOut)
+			for _, l := range strings.Split(strings.TrimRight(addOut, "\n"), "\n") {
+				line(l)
+			}
 
 			if err != nil {
 				return commandResult{
@@ -3757,20 +3948,26 @@ func commitCmd(r repo, items []commitItem, message string) tea.Cmd {
 				}
 			}
 
-			output.WriteString("\nUnversioned files added successfully.\n")
+			line("")
+			line("Unversioned files added successfully.")
 		}
 
-		output.WriteString("\nRunning commit...\n\n")
+		line("")
+		line("Running commit...")
+		line("")
 
 		args := []string{"commit"}
 		args = append(args, paths...)
 		args = append(args, "-m", message)
 
-		out, err := svn(r, args...)
-		output.WriteString(out)
+		err := svnStreamLines(r, func(raw string) {
+			output.WriteString(raw + "\n")
+			emit(raw)
+		}, args...)
 
 		if err == nil {
-			output.WriteString("\nCommit finished successfully.")
+			line("")
+			line("Commit finished successfully.")
 		}
 
 		return commandResult{
@@ -3778,7 +3975,7 @@ func commitCmd(r repo, items []commitItem, message string) tea.Cmd {
 			Err:             err,
 			CurrentLocation: getCurrentLocation(r),
 		}
-	}
+	})
 }
 
 func diffCmd(r repo, item commitItem, width int) tea.Cmd {
@@ -4316,28 +4513,22 @@ func colorizeSVNLogMetaLine(line string) string {
 	return b.String()
 }
 
-func colorizeSVNUpdateOutput(out string) string {
-	var b strings.Builder
-	for _, line := range strings.Split(out, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			b.WriteString("\n")
-			continue
-		}
-
-		if len(trimmed) >= 2 {
-			status := strings.TrimSpace(trimmed[:1])
-			path := strings.TrimSpace(trimmed[1:])
-			if status == "A" || status == "D" || status == "U" || status == "G" || status == "C" || status == "E" {
-				b.WriteString(statusStyleForSVNUpdateAction(status).Render(status) + " " + valueWhiteStyle.Render(path) + "\n")
-				continue
-			}
-		}
-
-		b.WriteString(mutedStyle.Render(line) + "\n")
+// colorizeSVNUpdateLine colorizes a single line of `svn update` output.
+func colorizeSVNUpdateLine(line string) string {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return ""
 	}
-	return strings.TrimRight(b.String(), "\n")
+	if len(trimmed) >= 2 {
+		status := strings.TrimSpace(trimmed[:1])
+		path := strings.TrimSpace(trimmed[1:])
+		if status == "A" || status == "D" || status == "U" || status == "G" || status == "C" || status == "E" {
+			return statusStyleForSVNUpdateAction(status).Render(status) + " " + valueWhiteStyle.Render(path)
+		}
+	}
+	return mutedStyle.Render(line)
 }
+
 
 func statusStyleForSVNUpdateAction(action string) lipgloss.Style {
 	switch strings.ToUpper(strings.TrimSpace(action)) {
@@ -5247,6 +5438,16 @@ func buildSideBySideDiff(r repo, item commitItem, width int) (string, error) {
 		}
 	}
 
+	if oldText == newText && !item.Unversioned && !strings.HasPrefix(item.Status, "?") && !strings.HasPrefix(item.Status, "A") && !strings.HasPrefix(item.Status, "D") {
+		out, err := svn(r, "diff", "--", item.Path)
+		if err == nil && strings.TrimSpace(out) != "" {
+			return "Path: " + item.Path + "\nStatus: " + item.Status + "\n\nNo text changes found in the file body. SVN reports a property-only/metadata diff instead:\n\n" + colorizeUnifiedDiff(out), nil
+		}
+		if err == nil {
+			return "Path: " + item.Path + "\nStatus: " + item.Status + "\n\nNo text or property diff found. This entry is probably SVN metadata noise, for example a switched marker, and should not appear in Commit/Revert after refreshing the list.", nil
+		}
+	}
+
 	oldLines := splitLinesForDiff(oldText)
 	newLines := splitLinesForDiff(newText)
 
@@ -5676,6 +5877,26 @@ func readWorkingFile(r repo, path string) (string, error) {
 	}
 
 	return string(data), nil
+}
+
+func isSVNDirectory(r repo, path string) bool {
+	if isLikelyDirectory(r, path) {
+		return true
+	}
+
+	out, err := svn(r, "info", "--", path)
+	if err != nil {
+		return false
+	}
+
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.EqualFold(line, "Node Kind: directory") {
+			return true
+		}
+	}
+
+	return false
 }
 
 func isLikelyDirectory(r repo, path string) bool {
@@ -6129,6 +6350,67 @@ func svn(r repo, args ...string) (string, error) {
 	out, err := cmd.CombinedOutput()
 
 	return string(out), err
+}
+
+// svnStreamLines runs an SVN command and calls emit once per output line as
+// the process runs. It returns the process exit error (nil on success).
+func svnStreamLines(r repo, emit func(string), args ...string) error {
+	finalArgs := svnBaseArgs(r, true)
+	finalArgs = append(finalArgs, args...)
+
+	cmd := exec.Command("svn", finalArgs...)
+	cmd.Dir = r.Path
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+
+	if err := cmd.Start(); err != nil {
+		pw.Close()
+		pr.Close()
+		return err
+	}
+
+	pw.Close() // parent does not write; closing it lets the reader see EOF
+
+	scanner := bufio.NewScanner(pr)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		emit(scanner.Text())
+	}
+	pr.Close()
+
+	return cmd.Wait()
+}
+
+// startStreamingCommand runs run in a background goroutine. run calls emit for
+// each output line it wants to surface; it returns the final commandResult.
+// The returned tea.Cmd starts the BubbleTea message chain.
+func startStreamingCommand(run func(emit func(string)) commandResult) tea.Cmd {
+	ch := make(chan svnStreamItem, 512)
+	go func() {
+		result := run(func(line string) {
+			ch <- svnStreamItem{line: line}
+		})
+		ch <- svnStreamItem{done: true, result: result}
+	}()
+	return readNextSVNStream(ch)
+}
+
+// readNextSVNStream returns a tea.Cmd that blocks until the next item arrives
+// on ch. If the item signals done, it returns the final commandResult so that
+// the existing commandResult handler in Update takes over.
+func readNextSVNStream(ch <-chan svnStreamItem) tea.Cmd {
+	return func() tea.Msg {
+		item := <-ch
+		if item.done {
+			return item.result
+		}
+		return streamOutputMsg{line: item.line, ch: ch}
+	}
 }
 
 func svnInteractive(r repo, args ...string) (string, error) {
