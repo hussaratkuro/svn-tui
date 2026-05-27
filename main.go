@@ -250,10 +250,12 @@ type model struct {
 	historyTitle   string
 	historyContent string
 	historySearch  string
-	runningTitle string
-	runningLines []string
-	result       string
-	err          error
+	runningTitle   string
+	runningLines   []string
+	runningOffset  int  // first visible line index; ignored when runningPinTail is true
+	runningPinTail bool // when true viewRunning always shows the last N lines (auto-scroll)
+	result         string
+	err            error
 }
 
 var (
@@ -377,8 +379,9 @@ func main() {
 			"Revision tree",
 			"Quit",
 		},
-		input:    input,
-		viewport: vp,
+		input:          input,
+		viewport:       vp,
+		runningPinTail: true,
 	}
 
 	if len(repos) == 0 {
@@ -831,10 +834,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case streamOutputMsg:
 		m.runningLines = append(m.runningLines, msg.line)
+		// Keep the offset pinned to the tail unless the user has scrolled up.
+		if m.runningPinTail {
+			m.runningOffset = max(0, len(m.runningLines)-m.visibleListCount(6))
+		}
 		return m, readNextSVNStream(msg.ch)
 
 	case commandResult:
 		m.runningLines = nil // clear streaming lines; result screen uses viewport
+		m.runningOffset = 0
+		m.runningPinTail = true
 		m.screen = screenResult
 		m.result = msg.Output
 		m.err = msg.Err
@@ -923,6 +932,23 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case screenShelveSelect:
 		m.commitCursor = clampInt(m.commitCursor+steps, 0, len(m.commitItems)-1)
 		m.commitOffset = adjustOffset(m.commitOffset, m.commitCursor, m.visibleListCount(12))
+
+	case screenRunning:
+		available := m.visibleListCount(6)
+		total := len(m.runningLines)
+		if steps < 0 { // wheel up
+			m.runningPinTail = false
+			m.runningOffset = clampInt(m.runningOffset+steps, 0, max(0, total-available))
+		} else { // wheel down
+			newOffset := m.runningOffset + steps
+			if newOffset >= total-available {
+				m.runningPinTail = true
+				m.runningOffset = max(0, total-available)
+			} else {
+				m.runningPinTail = false
+				m.runningOffset = newOffset
+			}
+		}
 
 	case screenHistory, screenDiff, screenResult:
 		var cmd tea.Cmd
@@ -1066,6 +1092,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.viewport.SetContent("")
 		}
 
+	case screenRunning:
+		return m.updateRunningScroll(msg), nil
+
 	case screenHistory, screenDiff:
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
@@ -1073,6 +1102,40 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m model) updateRunningScroll(msg tea.KeyMsg) model {
+	available := m.visibleListCount(6)
+	total := len(m.runningLines)
+
+	scroll := func(delta int) {
+		m.runningPinTail = false
+		m.runningOffset = clampInt(m.runningOffset+delta, 0, max(0, total-available))
+	}
+
+	switch msg.String() {
+	case "up", "k":
+		scroll(-1)
+	case "down", "j":
+		scroll(1)
+	case "pgup":
+		scroll(-available)
+	case "pgdown":
+		if m.runningOffset+available >= total-available {
+			// reaching the bottom re-pins to tail
+			m.runningPinTail = true
+			m.runningOffset = max(0, total-available)
+		} else {
+			scroll(available)
+		}
+	case "home":
+		m.runningPinTail = false
+		m.runningOffset = 0
+	case "end":
+		m.runningPinTail = true
+		m.runningOffset = max(0, total-available)
+	}
+	return m
 }
 
 func (m model) updateHistorySearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -2648,11 +2711,19 @@ func (m model) viewRunning() string {
 		return b.String()
 	}
 
-	// Show the last N lines that fit in the terminal.
 	available := m.visibleListCount(6)
-	start := max(0, len(m.runningLines)-available)
-	for _, line := range m.runningLines[start:] {
+	start := clampInt(m.runningOffset, 0, max(0, len(m.runningLines)-1))
+	end := min(start+available, len(m.runningLines))
+	for _, line := range m.runningLines[start:end] {
 		b.WriteString(line + "\n")
+	}
+
+	// Footer hint: show scroll position when not pinned to tail.
+	if !m.runningPinTail {
+		b.WriteString(mutedStyle.Render(fmt.Sprintf(
+			"↑/↓/PgUp/PgDn: scroll | Home: top | End: tail  [line %d/%d]",
+			start+1, len(m.runningLines),
+		)))
 	}
 
 	return b.String()
