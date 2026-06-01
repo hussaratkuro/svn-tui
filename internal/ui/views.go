@@ -861,7 +861,7 @@ func (m Model) viewRunning() string {
 }
 
 func (m Model) viewResult() string {
-	if m.err == nil && m.isCompactResultAction() {
+	if m.err == nil && m.isCompactResultAction() && !m.resultExpanded {
 		return m.viewCompactSuccess()
 	}
 
@@ -917,7 +917,7 @@ func (m Model) viewCompactSuccess() string {
 		c.WriteString(mutedStyle.Render("Revision: ") + successStyle.Render("r"+r.CurrentRevision) + "\n")
 	}
 	b.WriteString(m.listBox(c.String()))
-	b.WriteString(statusBar(hint("Enter", "back to menu"), hint("q", "quit")))
+	b.WriteString(statusBar(hint("Enter", "show log"), hint("q", "quit")))
 	return b.String()
 }
 

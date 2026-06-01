@@ -62,10 +62,11 @@ type Model struct {
 	input    textinput.Model
 	viewport viewport.Model
 
-	historyTitle   string
-	historyContent string
-	historySearch  string
-	runningTitle   string
+	historyTitle    string
+	historyContent  string
+	historySearch   string
+	resultExpanded  bool
+	runningTitle    string
 	runningLines   []string
 	runningOffset  int
 	runningPinTail bool
@@ -308,6 +309,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = model.ScreenResult
 		m.result = msg.Output
 		m.err = msg.Err
+		m.resultExpanded = false
 
 		location := svn.FirstNonEmpty(msg.CurrentLocation, svn.GetCurrentLocation(m.activeRepo))
 		currentURL := svn.FirstNonEmpty(msg.URL, svn.GetCurrentURL(m.activeRepo))
@@ -532,10 +534,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateHistorySearch(msg)
 	case model.ScreenResult:
 		if msg.String() == "enter" {
-			m.screen = model.ScreenActionSelect
-			m.result = ""
-			m.err = nil
-			m.viewport.SetContent("")
+			if m.err == nil && m.isCompactResultAction() && !m.resultExpanded {
+				m.resultExpanded = true
+				m.viewport.GotoTop()
+			} else {
+				m.screen = model.ScreenActionSelect
+				m.result = ""
+				m.err = nil
+				m.resultExpanded = false
+				m.viewport.SetContent("")
+			}
 		}
 	case model.ScreenRunning:
 		return m.updateRunningScroll(msg), nil
