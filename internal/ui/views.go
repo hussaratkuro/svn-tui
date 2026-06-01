@@ -499,7 +499,7 @@ func (m Model) viewCommitSelect() string {
 	if m.deleteConfirmIdx >= 0 {
 		b.WriteString("\n" + warningStyle.Render("Del again: confirm permanent deletion — or move cursor to cancel"))
 	} else {
-		hints := []string{hint("Space", "select"), hint("a", "all"), hint("n", "none"), hint("d", "diff"), hint("p", "partial hunks"), hint("Enter", "commit message"), hint("i", "info"), hint("Esc", "back")}
+		hints := []string{hint("Space", "select"), hint("a", "all"), hint("n", "none"), hint("h", "hide"), hint("d", "diff"), hint("p", "partial hunks"), hint("Enter", "commit message"), hint("i", "info"), hint("Esc", "back")}
 		canDelete := func(ci model.CommitItem) bool {
 			return ci.Unversioned || (len(ci.Status) > 0 && ci.Status[0] == 'A')
 		}
@@ -716,28 +716,60 @@ func (m Model) viewConflictSelect() string {
 	var b strings.Builder
 	b.WriteString(m.compactHeader("Resolve conflicts"))
 
-	items := max(3, m.listInnerHeight()-5)
+	selectedTree := 0
+	for _, ci := range m.conflictItems {
+		if ci.Selected && ci.IsTree {
+			selectedTree++
+		}
+	}
+
+	items := max(3, m.listInnerHeight()-6)
 	end := min(len(m.conflictItems), m.conflictOffset+items)
 
 	var c strings.Builder
+	c.WriteString(mutedStyle.Render(fmt.Sprintf("Tree conflicts selected: %d", selectedTree)) + "\n")
 	c.WriteString(textStyle.Render("Conflicted files:") + "\n")
 	c.WriteString(mutedStyle.Render("─────────────────") + "\n")
 	for i := m.conflictOffset; i < end; i++ {
 		item := m.conflictItems[i]
+		isCursor := i == m.conflictCursor
 		cursor := " "
-		lineStyle := normalStyle
-		if i == m.conflictCursor {
+		if isCursor {
 			cursor = ">"
-			lineStyle = selectedStyle
 		}
-		c.WriteString(lineStyle.Render(fmt.Sprintf("%s %-8s %s", cursor, item.Status, item.Path)) + "\n")
+		var check string
+		if item.IsTree {
+			if item.Selected {
+				check = checkedStyle.Render("[x]")
+			} else {
+				check = checkboxStyle.Render("[ ]")
+			}
+		} else {
+			check = "   "
+		}
+		line := fmt.Sprintf("%s %s %-10s %s", cursor, check, item.Status, item.Path)
+		if isCursor {
+			c.WriteString(selectedStyle.Render(line) + "\n")
+		} else if item.Selected {
+			c.WriteString(checkedStyle.Render(line) + "\n")
+		} else {
+			c.WriteString(normalStyle.Render(line) + "\n")
+		}
 	}
 	c.WriteString("\n")
-	c.WriteString(warningStyle.Render("File conflicts → Meld. Tree conflicts → --accept=working.") + "\n")
+	c.WriteString(warningStyle.Render("File conflicts → Meld (Enter). Tree conflicts → --accept=working (Space+r).") + "\n")
 	c.WriteString(mutedStyle.Render(scrollHint(m.conflictOffset, end, len(m.conflictItems))))
 
 	b.WriteString(m.listBox(c.String()))
-	b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("Enter", "resolve with Meld"), hint("i", "info"), hint("Esc", "back")))
+
+	hints := []string{hint("↑↓/jk", "move"), hint("Space", "select tree"), hint("a", "all tree"), hint("n", "none")}
+	if selectedTree > 0 {
+		hints = append(hints, hint("r", fmt.Sprintf("resolve %d tree", selectedTree)))
+	} else {
+		hints = append(hints, mutedStyle.Render("r: resolve selected tree"))
+	}
+	hints = append(hints, hint("Enter", "Meld"), hint("i", "info"), hint("Esc", "back"))
+	b.WriteString(statusBar(hints...))
 	return b.String()
 }
 
@@ -829,6 +861,10 @@ func (m Model) viewRunning() string {
 }
 
 func (m Model) viewResult() string {
+	if m.err == nil && m.isCompactResultAction() {
+		return m.viewCompactSuccess()
+	}
+
 	var b strings.Builder
 	if m.err != nil {
 		b.WriteString(m.compactHeader("Error"))
@@ -842,4 +878,55 @@ func (m Model) viewResult() string {
 	b.WriteString(m.listBox(vp.View()))
 	b.WriteString(statusBar(hint("↑↓", "scroll"), hint("PgUp/PgDn", "page"), hint("Enter", "back to menu"), hint("q", "quit")))
 	return b.String()
+}
+
+func (m Model) isCompactResultAction() bool {
+	switch m.selectedAction {
+	case model.ActionPull, model.ActionSwitchBranch, model.ActionSwitchTrunk,
+		model.ActionMergeBranch, model.ActionCreateBranch, model.ActionCheckoutRevision:
+		return true
+	}
+	return false
+}
+
+func (m Model) viewCompactSuccess() string {
+	var b strings.Builder
+	b.WriteString(m.compactHeader("Done"))
+
+	label := map[model.Action]string{
+		model.ActionPull:             "Pull",
+		model.ActionSwitchBranch:     "Switch branch",
+		model.ActionSwitchTrunk:      "Switch to trunk",
+		model.ActionMergeBranch:      "Merge branch",
+		model.ActionCreateBranch:     "Create branch",
+		model.ActionCheckoutRevision: "Checkout revision",
+	}[m.selectedAction]
+
+	summary := lastMeaningfulLine(m.result)
+
+	var c strings.Builder
+	c.WriteString(successStyle.Render("✓ "+label+" completed") + "\n\n")
+	if summary != "" {
+		c.WriteString(textStyle.Render(summary) + "\n")
+	}
+	r := m.activeRepo
+	if r.CurrentLocation != "" && r.CurrentLocation != "unknown" {
+		c.WriteString("\n" + mutedStyle.Render("Location: ") + labelYellowStyle.Render(r.CurrentLocation) + "\n")
+	}
+	if r.CurrentRevision != "" && r.CurrentRevision != "unknown" {
+		c.WriteString(mutedStyle.Render("Revision: ") + successStyle.Render("r"+r.CurrentRevision) + "\n")
+	}
+	b.WriteString(m.listBox(c.String()))
+	b.WriteString(statusBar(hint("Enter", "back to menu"), hint("q", "quit")))
+	return b.String()
+}
+
+func lastMeaningfulLine(s string) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		if l := strings.TrimSpace(lines[i]); l != "" {
+			return l
+		}
+	}
+	return ""
 }

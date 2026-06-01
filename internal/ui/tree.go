@@ -195,7 +195,10 @@ func detectRevisionMergeBacks(graph model.RevisionBranchGraph, entry model.SVNLo
 			continue
 		}
 		branchName := strings.ToLower(pathBaseName(sourcePath))
-		if branchName == "" || !strings.Contains(msg, branchName) {
+		if branchName == "" {
+			continue
+		}
+		if !strings.Contains(msg, branchName) && !branchNameWordsMatchMsg(branchName, msg) {
 			continue
 		}
 		for target := range entryRoots {
@@ -209,6 +212,34 @@ func detectRevisionMergeBacks(graph model.RevisionBranchGraph, entry model.SVNLo
 			})
 		}
 	}
+}
+
+// branchNameWordsMatchMsg returns true if any significant word from the branch
+// name appears in the commit message. Words shorter than 4 chars or purely
+// numeric (e.g. date segments like "2026", "05") are skipped to avoid noise.
+func branchNameWordsMatchMsg(branchName, msg string) bool {
+	parts := strings.FieldsFunc(branchName, func(r rune) bool {
+		return r == '-' || r == '_'
+	})
+	for _, part := range parts {
+		if len(part) < 4 {
+			continue
+		}
+		allDigits := true
+		for _, c := range part {
+			if c < '0' || c > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if allDigits {
+			continue
+		}
+		if strings.Contains(msg, part) {
+			return true
+		}
+	}
+	return false
 }
 
 func renderRevisionTreeNode(b *strings.Builder, graph model.RevisionBranchGraph, path, prefix string, last bool) {

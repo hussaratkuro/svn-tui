@@ -960,6 +960,16 @@ func (m Model) updateCommitSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.screen, m.runningTitle = model.ScreenRunning, "Loading partial commit hunks..."
 		return m, loadPartialHunksCmd(m.activeRepo, item)
 
+	case "h":
+		if len(m.commitItems) == 0 {
+			break
+		}
+		m.commitItems = append(m.commitItems[:m.commitCursor], m.commitItems[m.commitCursor+1:]...)
+		if m.commitCursor >= len(m.commitItems) {
+			m.commitCursor = max(0, len(m.commitItems)-1)
+		}
+		m.deleteConfirmIdx = -1
+
 	case "enter":
 		if len(selectedCommitItems(m.commitItems)) == 0 {
 			return m.showError("Select at least one file with Space before committing.", "no files selected"), nil
@@ -1125,10 +1135,39 @@ func (m Model) updateConflictSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	visible := m.visibleListCount(12)
 	m.conflictCursor = navigateCursor(m.conflictCursor, len(m.conflictItems), visible, msg.String())
 
-	if msg.String() == "enter" && len(m.conflictItems) > 0 {
-		selected := m.conflictItems[m.conflictCursor]
-		m.screen, m.runningTitle = model.ScreenRunning, "Resolving conflict with Meld..."
-		return m, resolveConflictWithMeldCmd(m.activeRepo, selected.Path)
+	switch msg.String() {
+	case " ":
+		if len(m.conflictItems) > 0 && m.conflictItems[m.conflictCursor].IsTree {
+			m.conflictItems[m.conflictCursor].Selected = !m.conflictItems[m.conflictCursor].Selected
+		}
+	case "a":
+		for i := range m.conflictItems {
+			if m.conflictItems[i].IsTree {
+				m.conflictItems[i].Selected = true
+			}
+		}
+	case "n":
+		for i := range m.conflictItems {
+			m.conflictItems[i].Selected = false
+		}
+	case "r":
+		var selected []model.ConflictItem
+		for _, item := range m.conflictItems {
+			if item.Selected && item.IsTree {
+				selected = append(selected, item)
+			}
+		}
+		if len(selected) == 0 {
+			break
+		}
+		m.screen, m.runningTitle = model.ScreenRunning, fmt.Sprintf("Resolving %d tree conflict(s)...", len(selected))
+		return m, resolveSelectedTreeConflictsCmd(m.activeRepo, selected)
+	case "enter":
+		if len(m.conflictItems) > 0 {
+			item := m.conflictItems[m.conflictCursor]
+			m.screen, m.runningTitle = model.ScreenRunning, "Resolving conflict with Meld..."
+			return m, resolveConflictWithMeldCmd(m.activeRepo, item.Path)
+		}
 	}
 
 	m.conflictOffset = adjustOffset(m.conflictOffset, m.conflictCursor, visible)

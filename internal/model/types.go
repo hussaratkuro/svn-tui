@@ -88,9 +88,10 @@ type CommitItem struct {
 }
 
 type ConflictItem struct {
-	Status string
-	Path   string
-	IsTree bool
+	Status   string
+	Path     string
+	IsTree   bool
+	Selected bool
 }
 
 // ── Command results ───────────────────────────────────────────────────────────

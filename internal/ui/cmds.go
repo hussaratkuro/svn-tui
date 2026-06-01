@@ -143,7 +143,7 @@ func switchBranchCmd(r model.Repo, branchName string) tea.Cmd {
 			colored := colorizeSVNUpdateLine(raw)
 			output.WriteString(colored + "\n")
 			emit(colored)
-		}, "switch", "--ignore-ancestry", branchURL)
+		}, "switch", branchURL)
 		if err == nil {
 			line("")
 			line("Switched to branch " + branchName + " successfully.")
@@ -168,7 +168,7 @@ func switchTrunkCmd(r model.Repo) tea.Cmd {
 			colored := colorizeSVNUpdateLine(raw)
 			output.WriteString(colored + "\n")
 			emit(colored)
-		}, "switch", "--ignore-ancestry", trunkURL)
+		}, "switch", trunkURL)
 		if err == nil {
 			line("")
 			line("Switched back to trunk successfully.")
@@ -532,9 +532,27 @@ func parseSVNLocalChangeStatusLine(r model.Repo, line string, includeUnversioned
 	}, true
 }
 
+// neverCommitNames lists path components that should never appear in the commit
+// list — Claude Code files and tool-generated output directories.
+var neverCommitNames = []string{
+	".claude",
+	"CLAUDE.md",
+	"graphify-out",
+}
+
 func shouldHideFromCommitSelect(path string) bool {
 	clean := strings.TrimPrefix(strings.TrimSpace(filepath.ToSlash(path)), "./")
-	return clean == "." || clean == model.ShelvesDir || strings.HasPrefix(clean, model.ShelvesDir+"/")
+	if clean == "." || clean == model.ShelvesDir || strings.HasPrefix(clean, model.ShelvesDir+"/") {
+		return true
+	}
+	for _, part := range strings.Split(clean, "/") {
+		for _, name := range neverCommitNames {
+			if part == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isScheduledDirChange returns true for directories that are newly scheduled
@@ -935,6 +953,42 @@ func copyFile(src, dst string, mode os.FileMode) error {
 }
 
 // ── Conflicts ─────────────────────────────────────────────────────────────────
+
+func resolveSelectedTreeConflictsCmd(r model.Repo, items []model.ConflictItem) tea.Cmd {
+	return startStreamingCommand(func(emit func(string)) model.CommandResult {
+		var output strings.Builder
+		line := func(s string) { output.WriteString(s + "\n"); emit(s) }
+
+		line(fmt.Sprintf("Resolving %d tree conflict(s) with --accept=working...", len(items)))
+		line("")
+
+		var failed []string
+		for _, item := range items {
+			out, err := svn.Run(r, "resolve", "--accept=working", item.Path)
+			if err != nil {
+				line("FAILED: " + item.Path + " — " + err.Error())
+				if strings.TrimSpace(out) != "" {
+					line(out)
+				}
+				failed = append(failed, item.Path)
+			} else {
+				line("Resolved: " + item.Path)
+			}
+		}
+
+		line("")
+		if len(failed) == 0 {
+			line(fmt.Sprintf("All %d tree conflict(s) resolved successfully.", len(items)))
+			return model.CommandResult{Output: output.String(), CurrentLocation: svn.GetCurrentLocation(r)}
+		}
+		line(fmt.Sprintf("%d of %d resolved. %d failed.", len(items)-len(failed), len(items), len(failed)))
+		return model.CommandResult{
+			Output: output.String(),
+			Err:    fmt.Errorf("%d tree conflict(s) could not be resolved", len(failed)),
+			CurrentLocation: svn.GetCurrentLocation(r),
+		}
+	})
+}
 
 func loadConflictItemsCmd(r model.Repo) tea.Cmd {
 	return func() tea.Msg {
