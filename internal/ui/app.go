@@ -438,13 +438,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "i":
-		if m.screen != model.ScreenRepoSelect {
+		if m.screen != model.ScreenRepoSelect && !m.inputActive() {
 			m.showInfo = !m.showInfo
 			return m, nil
 		}
 
 	case "/", "s":
-		if m.screen == model.ScreenHistory {
+		if m.screen == model.ScreenHistory && !m.inputActive() {
 			m.input.Reset()
 			m.input.Placeholder = "Revision number, e.g. 2225"
 			m.input.Focus()
@@ -454,21 +454,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "a":
-		if m.screen == model.ScreenHistory && m.selectedAction == model.ActionRevisionTree {
+		if m.screen == model.ScreenHistory && m.selectedAction == model.ActionRevisionTree && !m.inputActive() {
 			m.screen = model.ScreenRunning
 			m.runningTitle = "Building full ASCII revision tree..."
 			return m, loadRevisionTreeCmd(m.activeRepo, true)
 		}
 
 	case "q":
-		if m.screen == model.ScreenRepoSelect ||
-			m.screen == model.ScreenActionSelect ||
-			m.screen == model.ScreenResult ||
-			m.screen == model.ScreenHistory {
-			return m, tea.Quit
+		if !m.inputActive() {
+			if m.screen == model.ScreenRepoSelect ||
+				m.screen == model.ScreenActionSelect ||
+				m.screen == model.ScreenResult ||
+				m.screen == model.ScreenHistory {
+				return m, tea.Quit
+			}
+			m.screen = model.ScreenActionSelect
+			return m, nil
 		}
-		m.screen = model.ScreenActionSelect
-		return m, nil
 
 	case "esc":
 		switch m.screen {
@@ -891,7 +893,8 @@ func (m Model) updateCommitSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		item := m.commitItems[m.commitCursor]
-		if !item.Unversioned {
+		statusIsA := len(item.Status) > 0 && item.Status[0] == 'A'
+		if !item.Unversioned && !statusIsA {
 			break
 		}
 		if m.deleteConfirmIdx != m.commitCursor {
@@ -900,6 +903,11 @@ func (m Model) updateCommitSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.deleteConfirmIdx = -1
 		fullPath := fmt.Sprintf("%s/%s", m.activeRepo.Path, item.Path)
+		if statusIsA {
+			if _, err := svn.Run(m.activeRepo, "revert", "--depth", "infinity", item.Path); err != nil {
+				return m.showError("Failed to revert "+item.Path, err.Error()), nil
+			}
+		}
 		var deleteErr error
 		if item.IsDir {
 			deleteErr = removeAll(fullPath)
@@ -909,7 +917,14 @@ func (m Model) updateCommitSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if deleteErr != nil {
 			return m.showError("Failed to delete "+item.Path, deleteErr.Error()), nil
 		}
-		m.commitItems = append(m.commitItems[:m.commitCursor], m.commitItems[m.commitCursor+1:]...)
+		prefix := item.Path + "/"
+		kept := m.commitItems[:0:0]
+		for _, ci := range m.commitItems {
+			if ci.Path != item.Path && !strings.HasPrefix(ci.Path, prefix) {
+				kept = append(kept, ci)
+			}
+		}
+		m.commitItems = kept
 		if m.commitCursor >= len(m.commitItems) {
 			m.commitCursor = max(0, len(m.commitItems)-1)
 		}
@@ -1097,7 +1112,7 @@ func (m Model) updateCommitMessageInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen, m.runningTitle = model.ScreenRunning, "Committing selected hunks..."
 			return m, partialHunkCommitCmd(m.activeRepo, item, hunks, message)
 		}
-		items := selectedCommitItems(m.commitItems)
+		items := withRequiredParentDirs(selectedCommitItems(m.commitItems), m.commitItems)
 		m.screen, m.runningTitle = model.ScreenRunning, "Committing selected files..."
 		return m, commitCmd(m.activeRepo, items, message)
 	}
@@ -1142,6 +1157,18 @@ func (m Model) headerLines() int {
 		return 6 // header text + 4 info lines + blank
 	}
 	return 2 // header text + blank
+}
+
+func (m Model) inputActive() bool {
+	switch m.screen {
+	case model.ScreenCreateBranchInput,
+		model.ScreenCheckoutRevisionInput,
+		model.ScreenCommitMessageInput,
+		model.ScreenFileHistorySearch,
+		model.ScreenHistorySearch:
+		return true
+	}
+	return false
 }
 
 func (m Model) branchListVisibleCount() int {

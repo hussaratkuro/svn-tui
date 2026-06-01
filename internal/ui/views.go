@@ -470,6 +470,8 @@ func (m Model) viewCommitSelect() string {
 			} else {
 				status = "? add"
 			}
+		} else if armed && len(item.Status) > 0 && item.Status[0] == 'A' {
+			status = "A DEL!"
 		}
 		line := fmt.Sprintf("%s %s %-8s %s", cursor, checkText, status, item.Path)
 		if armed {
@@ -498,8 +500,22 @@ func (m Model) viewCommitSelect() string {
 		b.WriteString("\n" + warningStyle.Render("Del again: confirm permanent deletion — or move cursor to cancel"))
 	} else {
 		hints := []string{hint("Space", "select"), hint("a", "all"), hint("n", "none"), hint("d", "diff"), hint("p", "partial hunks"), hint("Enter", "commit message"), hint("i", "info"), hint("Esc", "back")}
-		if len(m.commitItems) > 0 && m.commitItems[m.commitCursor].Unversioned {
-			hints = append(hints, hint("Del", "delete file"))
+		canDelete := func(ci model.CommitItem) bool {
+			return ci.Unversioned || (len(ci.Status) > 0 && ci.Status[0] == 'A')
+		}
+		hasDeletable := false
+		for _, ci := range m.commitItems {
+			if canDelete(ci) {
+				hasDeletable = true
+				break
+			}
+		}
+		if hasDeletable {
+			if len(m.commitItems) > 0 && canDelete(m.commitItems[m.commitCursor]) {
+				hints = append(hints, hint("Del", "delete"))
+			} else {
+				hints = append(hints, mutedStyle.Render("Del: delete"))
+			}
 		}
 		b.WriteString(statusBar(hints...))
 	}

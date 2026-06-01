@@ -537,15 +537,55 @@ func shouldHideFromCommitSelect(path string) bool {
 	return clean == "." || clean == model.ShelvesDir || strings.HasPrefix(clean, model.ShelvesDir+"/")
 }
 
+// isScheduledDirChange returns true for directories that are newly scheduled
+// (A = added, R = replaced) and must be included in any commit that touches
+// their children. SVN reports R  + for directories replaced with copy history.
+func isScheduledDirChange(item model.CommitItem) bool {
+	return item.IsDir && len(item.Status) > 0 && (item.Status[0] == 'A' || item.Status[0] == 'R')
+}
+
 func filterSelectFilesOnly(r model.Repo, items []model.CommitItem) []model.CommitItem {
 	filtered := make([]model.CommitItem, 0, len(items))
 	for _, item := range items {
-		if !item.Unversioned && (item.IsDir || isSVNDir(r, item.Path)) {
+		isDir := item.IsDir || isSVNDir(r, item.Path)
+		item.IsDir = isDir
+		if isDir && !item.Unversioned && !isScheduledDirChange(item) {
 			continue
 		}
 		filtered = append(filtered, item)
 	}
 	return filtered
+}
+
+// withRequiredParentDirs augments selected with any A/R-status directory from
+// allItems that is an ancestor of a selected path but was not itself selected.
+// SVN requires newly-added/replaced parent directories to be part of the same commit.
+func withRequiredParentDirs(selected []model.CommitItem, allItems []model.CommitItem) []model.CommitItem {
+	addedDirs := make(map[string]model.CommitItem)
+	for _, item := range allItems {
+		if isScheduledDirChange(item) {
+			addedDirs[item.Path] = item
+		}
+	}
+	if len(addedDirs) == 0 {
+		return selected
+	}
+	inSelected := make(map[string]bool)
+	for _, item := range selected {
+		inSelected[item.Path] = true
+	}
+	result := append([]model.CommitItem(nil), selected...)
+	for _, item := range selected {
+		dir := filepath.ToSlash(filepath.Dir(item.Path))
+		for dir != "" && dir != "." {
+			if d, ok := addedDirs[dir]; ok && !inSelected[d.Path] {
+				result = append(result, d)
+				inSelected[d.Path] = true
+			}
+			dir = filepath.ToSlash(filepath.Dir(dir))
+		}
+	}
+	return result
 }
 
 func commitCmd(r model.Repo, items []model.CommitItem, message string) tea.Cmd {
@@ -589,6 +629,25 @@ func commitCmd(r model.Repo, items []model.CommitItem, message string) tea.Cmd {
 			}
 			if err != nil {
 				return model.CommandResult{Output: output.String(), Err: err, CurrentLocation: svn.GetCurrentLocation(r)}
+			}
+			// --parents may add ancestor directories not in paths; include them so SVN
+			// does not reject the commit with E200009 ("not part of the commit").
+			for _, addedLine := range strings.Split(addOut, "\n") {
+				fields := strings.Fields(addedLine)
+				if len(fields) < 2 || fields[0] != "A" {
+					continue
+				}
+				ap := strings.TrimPrefix(filepath.ToSlash(fields[len(fields)-1]), "./")
+				alreadyIn := false
+				for _, p := range paths {
+					if p == ap {
+						alreadyIn = true
+						break
+					}
+				}
+				if !alreadyIn {
+					paths = append(paths, ap)
+				}
 			}
 			line("")
 			line("Unversioned files added successfully.")
