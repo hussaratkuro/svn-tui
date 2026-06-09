@@ -34,6 +34,8 @@ type Model struct {
 	branchCursor      int
 	branchOffset      int
 	branchNumberInput string
+	branchFilter      string
+	branchFilterMode  bool
 
 	shelves     []string
 	shelfCursor int
@@ -135,6 +137,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.branches = msg.Branches
 		m.branchCursor, m.branchOffset, m.branchNumberInput = 0, 0, ""
+		m.branchFilter, m.branchFilterMode = "", false
 		m.screen = model.ScreenBranchSelect
 		return m, nil
 
@@ -392,7 +395,8 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	switch m.screen {
 	case model.ScreenBranchSelect:
 		m.branchNumberInput = ""
-		m.branchCursor = clamp(m.branchCursor+steps, 0, len(m.branches)-1)
+		filtered := m.filteredBranches()
+		m.branchCursor = clamp(m.branchCursor+steps, 0, max(0, len(filtered)-1))
 		m.branchOffset = adjustOffset(m.branchOffset, m.branchCursor, m.branchListVisibleCount())
 
 	case model.ScreenShelfSelect:
@@ -759,11 +763,69 @@ func (m Model) updateFileHistorySelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) filteredBranches() []model.Branch {
+	if m.branchFilter == "" {
+		return m.branches
+	}
+	filter := strings.ToLower(m.branchFilter)
+	var result []model.Branch
+	for _, br := range m.branches {
+		if strings.Contains(strings.ToLower(br.Name), filter) {
+			result = append(result, br)
+		}
+	}
+	return result
+}
+
 func (m Model) updateBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	visible := m.branchListVisibleCount()
 	key := msg.String()
+	filtered := m.filteredBranches()
+
+	if m.branchFilterMode {
+		switch key {
+		case "esc":
+			m.branchFilter, m.branchFilterMode = "", false
+			m.branchCursor, m.branchOffset = 0, 0
+		case "enter":
+			if len(filtered) == 0 {
+				break
+			}
+			selected := filtered[m.branchCursor]
+			m.branchFilter, m.branchFilterMode = "", false
+			if m.selectedAction == model.ActionMergeBranch {
+				m.screen, m.runningTitle = model.ScreenRunning, "Merging branch..."
+				return m, mergeBranchCmd(m.activeRepo, selected.Name)
+			}
+			m.screen, m.runningTitle = model.ScreenRunning, "Switching to branch..."
+			return m, switchBranchCmd(m.activeRepo, selected.Name)
+		case "backspace", "ctrl+h":
+			if len(m.branchFilter) > 0 {
+				m.branchFilter = m.branchFilter[:len(m.branchFilter)-1]
+				m.branchCursor = 0
+				m.branchOffset = 0
+			}
+		case "up", "k", "down", "j", "pgup", "pgdown", "home", "end":
+			m.branchCursor = navigateCursor(m.branchCursor, len(filtered), visible, key)
+		default:
+			if len(key) == 1 && key >= " " {
+				m.branchFilter += key
+				m.branchCursor = 0
+				m.branchOffset = 0
+			}
+		}
+		filtered = m.filteredBranches()
+		m.branchCursor = clamp(m.branchCursor, 0, max(0, len(filtered)-1))
+		m.branchOffset = adjustOffset(m.branchOffset, m.branchCursor, visible)
+		return m, nil
+	}
 
 	switch key {
+	case "/":
+		m.branchFilterMode = true
+		m.branchFilter = ""
+		m.branchCursor, m.branchOffset = 0, 0
+
 	case "up", "k", "down", "j", "pgup", "pgdown", "home", "end":
 		m.branchNumberInput = ""
 		m.branchCursor = navigateCursor(m.branchCursor, len(m.branches), visible, key)

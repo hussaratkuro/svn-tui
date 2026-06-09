@@ -244,35 +244,45 @@ func (m Model) viewBranchSelect() string {
 	var b strings.Builder
 	b.WriteString(m.compactHeader(title))
 
+	filtered := m.filteredBranches()
+
 	overhead := 4
-	if strings.TrimSpace(m.branchNumberInput) != "" {
+	if strings.TrimSpace(m.branchNumberInput) != "" || m.branchFilterMode {
 		overhead = 5
 	}
 	items := max(3, m.listInnerHeight()-overhead)
-	end := min(len(m.branches), m.branchOffset+items)
+	end := min(len(filtered), m.branchOffset+items)
 
 	var c strings.Builder
 	c.WriteString(textStyle.Render("Available SVN branches:") + "\n")
-	if strings.TrimSpace(m.branchNumberInput) != "" {
+	if m.branchFilterMode {
+		cursor := "_"
+		c.WriteString(labelYellowStyle.Render("/") + valueWhiteStyle.Render(m.branchFilter+cursor) +
+			mutedStyle.Render(fmt.Sprintf("  %d/%d  Enter: "+enterAction+" | Esc: cancel", len(filtered), len(m.branches))) + "\n")
+	} else if strings.TrimSpace(m.branchNumberInput) != "" {
 		c.WriteString(labelYellowStyle.Render("Branch number: ") + valueWhiteStyle.Render(m.branchNumberInput) +
 			mutedStyle.Render("  Enter: "+enterAction+" | Backspace: edit") + "\n")
 	}
 	c.WriteString(mutedStyle.Render("─────────────────────────") + "\n")
 	for i := m.branchOffset; i < end; i++ {
-		br := m.branches[i]
+		br := filtered[i]
 		cursor := " "
 		lineStyle := normalStyle
 		if i == m.branchCursor {
 			cursor = ">"
 			lineStyle = selectedStyle
 		}
-		c.WriteString(lineStyle.Render(fmt.Sprintf("%s %3d) %s", cursor, i+1, br.Name)) + "\n")
+		c.WriteString(lineStyle.Render(fmt.Sprintf("%s %s", cursor, br.Name)) + "\n")
 	}
 	c.WriteString("\n")
-	c.WriteString(mutedStyle.Render(scrollHint(m.branchOffset, end, len(m.branches))))
+	c.WriteString(mutedStyle.Render(scrollHint(m.branchOffset, end, len(filtered))))
 
 	b.WriteString(m.listBox(c.String()))
-	b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("0-9", "jump to number"), hint("Enter", enterAction), hint("i", "info"), hint("Esc", "back")))
+	if m.branchFilterMode {
+		b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("Enter", enterAction), hint("Esc", "cancel search")))
+	} else {
+		b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("/", "search"), hint("0-9", "jump to number"), hint("Enter", enterAction), hint("Esc", "back")))
+	}
 	return b.String()
 }
 
