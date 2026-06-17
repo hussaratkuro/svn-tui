@@ -1269,6 +1269,9 @@ func (m Model) headerLines() int {
 }
 
 func (m Model) inputActive() bool {
+	if m.branchFilterMode {
+		return true
+	}
 	switch m.screen {
 	case model.ScreenCreateBranchInput,
 		model.ScreenCheckoutRevisionInput,
