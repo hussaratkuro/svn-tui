@@ -538,6 +538,7 @@ var neverCommitNames = []string{
 	".claude",
 	"CLAUDE.md",
 	"graphify-out",
+	"vendor",
 }
 
 func shouldHideFromCommitSelect(path string) bool {
