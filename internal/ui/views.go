@@ -802,27 +802,46 @@ func (m Model) viewHistory() string {
 	}
 	vp := m.viewport
 	vp.Height = max(3, m.listInnerHeight()-overhead)
+	if len(m.historyBlocks) > 0 {
+		cursor := clamp(m.historyCursor, 0, len(m.historyBlocks)-1)
+		vp.SetContent(highlightHistoryBlock(m.historyContent, m.historyBlocks[cursor]))
+	}
 
 	var c strings.Builder
 	if m.screen == model.ScreenHistorySearch {
-		c.WriteString(labelSapphireStyle.Render("Search revision: ") + m.input.View() + "\n")
+		c.WriteString(labelSapphireStyle.Render("Search text: ") + m.input.View() + "\n")
 	}
 	if strings.TrimSpace(m.historySearch) != "" {
-		c.WriteString(mutedStyle.Render("Last search: r"+strings.TrimPrefix(strings.TrimSpace(m.historySearch), "r")) + "\n")
+		info := mutedStyle.Render(fmt.Sprintf("Search: %s  (%d matches)", m.historySearch, len(m.historyMatches)))
+		if pos, ok := indexOfInt(m.historyMatches, m.historyCursor); ok {
+			info = mutedStyle.Render(fmt.Sprintf("Search: %s  ", m.historySearch)) +
+				labelYellowStyle.Render(fmt.Sprintf("match %d/%d", pos+1, len(m.historyMatches)))
+		}
+		c.WriteString(info + "\n")
 	}
 	c.WriteString(textStyle.Render(vp.View()))
-	if strings.TrimSpace(m.result) != "" && strings.Contains(m.result, "was not found") {
+	if strings.TrimSpace(m.result) != "" && (strings.Contains(m.result, "No matches") || strings.Contains(m.result, "was not found")) {
 		c.WriteString("\n" + warningStyle.Render(m.result))
 	}
 
 	b.WriteString(m.listBox(c.String()))
 
-	if m.screen == model.ScreenHistorySearch {
-		b.WriteString(statusBar(hint("Enter", "jump to revision"), hint("Esc", "cancel")))
-	} else if m.selectedAction == model.ActionRevisionTree {
-		b.WriteString(statusBar(hint("↑↓", "scroll"), hint("PgUp/PgDn", "page"), hint("/", "search"), hint("a", "full history"), hint("i", "info"), hint("Esc", "back"), hint("q", "quit")))
-	} else {
-		b.WriteString(statusBar(hint("↑↓", "scroll"), hint("PgUp/PgDn", "page"), hint("/", "search revision"), hint("i", "info"), hint("Esc", "back"), hint("q", "quit")))
+	switch {
+	case m.screen == model.ScreenHistorySearch:
+		b.WriteString(statusBar(hint("Enter", "search"), hint("Esc", "cancel")))
+	case len(m.historyBlocks) > 0:
+		hints := []string{hint("↑↓/jk", "select commit"), hint("d", "view commit diff")}
+		if len(m.historyMatches) > 0 {
+			hints = append(hints, hint("n/N", "next/prev match"))
+		}
+		hints = append(hints, hint("/", "search text"))
+		if m.selectedAction == model.ActionRevisionTree {
+			hints = append(hints, hint("a", "full history"))
+		}
+		hints = append(hints, hint("i", "info"), hint("Esc", "back"), hint("q", "quit"))
+		b.WriteString(statusBar(hints...))
+	default:
+		b.WriteString(statusBar(hint("↑↓", "scroll"), hint("PgUp/PgDn", "page"), hint("Esc", "back"), hint("q", "quit")))
 	}
 	return b.String()
 }

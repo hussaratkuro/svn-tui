@@ -64,11 +64,14 @@ type Model struct {
 	input    textinput.Model
 	viewport viewport.Model
 
-	historyTitle    string
-	historyContent  string
-	historySearch   string
-	resultExpanded  bool
-	runningTitle    string
+	historyTitle   string
+	historyContent string
+	historyBlocks  []historyBlock
+	historySearch  string
+	historyMatches []int
+	historyCursor  int
+	resultExpanded bool
+	runningTitle   string
 	runningLines   []string
 	runningOffset  int
 	runningPinTail bool
@@ -248,6 +251,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.historyContent = msg.Output
 		}
 		m.historySearch = ""
+		m.historyBlocks = parseHistoryBlocks(m.historyContent)
+		m.historyMatches = nil
+		m.historyCursor = 0
 		m.viewport.SetContent(m.historyContent)
 		m.viewport.GotoTop()
 		return m, nil
@@ -452,7 +458,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "/", "s":
 		if m.screen == model.ScreenHistory && !m.inputActive() {
 			m.input.Reset()
-			m.input.Placeholder = "Revision number, e.g. 2225"
+			m.input.Placeholder = "Search text: message, author, path, or revision"
 			m.input.Focus()
 			m.result = ""
 			m.screen = model.ScreenHistorySearch
@@ -492,6 +498,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.screen = model.ScreenRevertSelect
 			case model.ActionShelveChanges:
 				m.screen = model.ScreenShelveSelect
+			case model.ActionCommitHistory, model.ActionFileHistory, model.ActionRevisionTree:
+				m.screen = model.ScreenHistory
+				m.viewport.SetContent(m.historyContent)
+				if len(m.historyBlocks) > 0 {
+					m.viewport.YOffset = m.historyBlockOffset(m.historyCursor)
+				}
 			default:
 				m.screen = model.ScreenCommitSelect
 			}
@@ -551,7 +563,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case model.ScreenRunning:
 		return m.updateRunningScroll(msg), nil
-	case model.ScreenHistory, model.ScreenDiff:
+	case model.ScreenHistory:
+		return m.updateHistoryScreen(msg)
+	case model.ScreenDiff:
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		return m, cmd
@@ -601,20 +615,66 @@ func (m Model) updateHistorySearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.historySearch = query
 		m.result = ""
 		m.screen = model.ScreenHistory
+		m.historyMatches = nil
 		if query == "" {
 			return m, nil
 		}
-		line, ok := findRevisionLine(m.historyContent, query)
-		if !ok {
-			m.result = fmt.Sprintf("Revision r%s was not found in the currently loaded history.", strings.TrimPrefix(query, "r"))
+		matches := searchHistoryBlocks(m.historyContent, m.historyBlocks, query)
+		if len(matches) == 0 {
+			m.result = fmt.Sprintf("No matches found for %q in the currently loaded history.", query)
 			return m, nil
 		}
-		m.viewport.YOffset = clamp(line, 0, max(0, len(strings.Split(m.historyContent, "\n"))-1))
+		m.historyMatches = matches
+		m.historyCursor = matches[0]
+		m.viewport.YOffset = m.historyBlockOffset(m.historyCursor)
 		return m, nil
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
+}
+
+// updateHistoryScreen handles the loaded commit history screen. Up/down (and
+// j/k, pgup/pgdown, home/end) always step between commits one at a time — the
+// default way to browse history — d opens the diff for the currently selected
+// commit, and — when a text search is active — n/N jump directly to the
+// next/previous matching commit.
+func (m Model) updateHistoryScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if len(m.historyBlocks) > 0 {
+		switch msg.String() {
+		case "up", "k", "down", "j", "pgup", "pgdown", "home", "end":
+			m.historyCursor = navigateCursor(m.historyCursor, len(m.historyBlocks), 5, msg.String())
+			m.viewport.YOffset = m.historyBlockOffset(m.historyCursor)
+			return m, nil
+		case "n":
+			if idx, ok := nextMatchIndex(m.historyMatches, m.historyCursor, 1); ok {
+				m.historyCursor = idx
+				m.viewport.YOffset = m.historyBlockOffset(m.historyCursor)
+			}
+			return m, nil
+		case "N":
+			if idx, ok := nextMatchIndex(m.historyMatches, m.historyCursor, -1); ok {
+				m.historyCursor = idx
+				m.viewport.YOffset = m.historyBlockOffset(m.historyCursor)
+			}
+			return m, nil
+		case "d":
+			rev := m.historyBlocks[m.historyCursor].revision
+			m.screen, m.runningTitle = model.ScreenRunning, fmt.Sprintf("Loading diff for r%d...", rev)
+			return m, commitDiffCmd(m.activeRepo, rev)
+		}
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.viewport, cmd = m.viewport.Update(msg)
+	return m, cmd
+}
+
+// historyBlockOffset returns the viewport line offset for the given commit
+// index, clamped to the currently loaded history content.
+func (m Model) historyBlockOffset(idx int) int {
+	total := len(strings.Split(m.historyContent, "\n"))
+	return clamp(m.historyBlocks[idx].startLine, 0, max(0, total-1))
 }
 
 func (m Model) updateRepoSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

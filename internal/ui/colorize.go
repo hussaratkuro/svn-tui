@@ -2,6 +2,7 @@ package ui
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -107,6 +108,10 @@ func isSVNLogSeparator(line string) bool {
 func colorizeUnifiedDiff(out string) string {
 	var b strings.Builder
 	for _, line := range strings.Split(out, "\n") {
+		// Files in this project use CRLF line endings, so svn diff lines end in
+		// \r; left in place, that raw \r corrupts terminal rendering (cursor
+		// jumps to column 0 without erasing, leaving stray fragments on screen).
+		line = strings.TrimSuffix(line, "\r")
 		switch {
 		case strings.HasPrefix(line, "+++") || strings.HasPrefix(line, "---"):
 			b.WriteString(labelMauveStyle.Render(line) + "\n")
@@ -235,16 +240,107 @@ func renderPartialHunkPreview(h model.PartialHunk, maxChangedLines int) []string
 	return out
 }
 
-func findRevisionLine(content string, query string) (int, bool) {
-	q := strings.TrimSpace(strings.ToLower(query))
-	q = strings.TrimPrefix(q, "r")
+// historyBlock is one commit entry's line range within rendered history content,
+// used to search and navigate between whole commits rather than individual lines.
+type historyBlock struct {
+	startLine int
+	endLine   int // exclusive
+	revision  int
+}
+
+var historyRevisionLineRe = regexp.MustCompile(`^r(\d+)\s*\|`)
+
+// parseHistoryBlocks splits rendered `svn log` content into per-commit blocks,
+// delimited by the "----" separator lines svn prints between entries.
+func parseHistoryBlocks(content string) []historyBlock {
+	lines := strings.Split(content, "\n")
+	var blocks []historyBlock
+	current := historyBlock{startLine: -1}
+	flush := func(end int) {
+		if current.startLine >= 0 && current.revision != 0 {
+			current.endLine = end
+			blocks = append(blocks, current)
+		}
+	}
+	for i, line := range lines {
+		plain := stripANSI(line)
+		if isSVNLogSeparator(strings.TrimSpace(plain)) {
+			flush(i)
+			current = historyBlock{startLine: i + 1}
+			continue
+		}
+		if current.revision == 0 {
+			if m := historyRevisionLineRe.FindStringSubmatch(plain); m != nil {
+				rev, _ := strconv.Atoi(m[1])
+				current.revision = rev
+			}
+		}
+	}
+	flush(len(lines))
+	return blocks
+}
+
+// searchHistoryBlocks returns the indices (into blocks) of commits whose text
+// contains query (case-insensitive), in original order.
+func searchHistoryBlocks(content string, blocks []historyBlock, query string) []int {
+	q := strings.ToLower(strings.TrimSpace(query))
 	if q == "" {
+		return nil
+	}
+	lines := strings.Split(content, "\n")
+	var matched []int
+	for idx, b := range blocks {
+		end := min(b.endLine, len(lines))
+		for i := b.startLine; i < end; i++ {
+			if strings.Contains(strings.ToLower(stripANSI(lines[i])), q) {
+				matched = append(matched, idx)
+				break
+			}
+		}
+	}
+	return matched
+}
+
+// highlightHistoryBlock marks b's meta line with a cursor arrow so the currently
+// selected commit is visible without disturbing the rest of the colorized content.
+func highlightHistoryBlock(content string, b historyBlock) string {
+	if b.startLine < 0 {
+		return content
+	}
+	lines := strings.Split(content, "\n")
+	if b.startLine >= len(lines) {
+		return content
+	}
+	lines[b.startLine] = selectedStyle.Render("▶ ") + lines[b.startLine]
+	return strings.Join(lines, "\n")
+}
+
+// nextMatchIndex finds the match adjacent to cursor in direction (+1 forward,
+// -1 backward) among matches (ascending block indices), wrapping at the ends.
+func nextMatchIndex(matches []int, cursor, direction int) (int, bool) {
+	if len(matches) == 0 {
 		return 0, false
 	}
-	revPattern := regexp.MustCompile(`(^|[^0-9])r?` + regexp.QuoteMeta(q) + `([^0-9]|$)`)
-	for i, line := range strings.Split(content, "\n") {
-		plain := strings.ToLower(stripANSI(line))
-		if strings.Contains(plain, "r"+q) || revPattern.MatchString(plain) {
+	if direction >= 0 {
+		for _, idx := range matches {
+			if idx > cursor {
+				return idx, true
+			}
+		}
+		return matches[0], true
+	}
+	for i := len(matches) - 1; i >= 0; i-- {
+		if matches[i] < cursor {
+			return matches[i], true
+		}
+	}
+	return matches[len(matches)-1], true
+}
+
+// indexOfInt returns the position of v within s, if present.
+func indexOfInt(s []int, v int) (int, bool) {
+	for i, x := range s {
+		if x == v {
 			return i, true
 		}
 	}

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -539,6 +540,8 @@ var neverCommitNames = []string{
 	"CLAUDE.md",
 	"graphify-out",
 	"vendor",
+	"hussar",
+	"vanta",
 }
 
 func shouldHideFromCommitSelect(path string) bool {
@@ -984,8 +987,8 @@ func resolveSelectedTreeConflictsCmd(r model.Repo, items []model.ConflictItem) t
 		}
 		line(fmt.Sprintf("%d of %d resolved. %d failed.", len(items)-len(failed), len(items), len(failed)))
 		return model.CommandResult{
-			Output: output.String(),
-			Err:    fmt.Errorf("%d tree conflict(s) could not be resolved", len(failed)),
+			Output:          output.String(),
+			Err:             fmt.Errorf("%d tree conflict(s) could not be resolved", len(failed)),
 			CurrentLocation: svn.GetCurrentLocation(r),
 		}
 	})
@@ -1288,6 +1291,25 @@ func diffCmd(r model.Repo, item model.CommitItem, width int) tea.Cmd {
 			return model.DiffLoadedMsg{Output: out, Err: fmt.Errorf("side-by-side diff failed\n\nWorking copy: %s\nPath: %s\n\nError: %w", r.Path, item.Path, err), Path: item.Path}
 		}
 		return model.DiffLoadedMsg{Output: out, Path: item.Path}
+	}
+}
+
+// commitDiffCmd loads the unified diff introduced by a single revision, i.e.
+// what changed in that commit (svn diff -c REV compares REV-1 to REV).
+func commitDiffCmd(r model.Repo, revision int) tea.Cmd {
+	return func() tea.Msg {
+		revStr := strconv.Itoa(revision)
+		label := "r" + revStr
+		out, err := svn.Run(r, "diff", "-c", revStr)
+		if err != nil {
+			return model.DiffLoadedMsg{Output: out, Err: fmt.Errorf("svn diff -c %s failed\n\nOutput:\n%s\n\nError: %w", revStr, out, err), Path: label}
+		}
+		if strings.TrimSpace(out) == "" {
+			out = "No diff found for revision " + label
+		} else {
+			out = "Commit diff: " + label + "\n\n" + colorizeUnifiedDiff(out)
+		}
+		return model.DiffLoadedMsg{Output: out, Path: label}
 	}
 }
 
