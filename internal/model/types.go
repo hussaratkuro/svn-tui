@@ -46,6 +46,7 @@ const (
 	ActionSwitchTrunk
 	ActionCheckoutRevision
 	ActionResolveConflicts
+	ActionCleanup
 	ActionCommitHistory
 	ActionFileHistory
 	ActionRevisionTree
@@ -88,10 +89,9 @@ type CommitItem struct {
 }
 
 type ConflictItem struct {
-	Status   string
-	Path     string
-	IsTree   bool
-	Selected bool
+	Status string
+	Path   string
+	IsTree bool
 }
 
 // ── Command results ───────────────────────────────────────────────────────────

@@ -411,6 +411,29 @@ func statusCmd(r model.Repo) tea.Cmd {
 	}
 }
 
+func cleanupCmd(r model.Repo) tea.Cmd {
+	return startStreamingCommand(func(emit func(string)) model.CommandResult {
+		var output strings.Builder
+		line := func(s string) { output.WriteString(s + "\n"); emit(s) }
+
+		line("Working copy: " + r.Path)
+		line("Running: svn cleanup")
+		line("")
+
+		err := svn.StreamLines(r, func(raw string) {
+			colored := colorizeSVNUpdateLine(raw)
+			output.WriteString(colored + "\n")
+			emit(colored)
+		}, "cleanup")
+		if err == nil {
+			line("")
+			line("Cleanup finished successfully.")
+			line("Stale locks were released and unfinished operations rolled back.")
+		}
+		return model.CommandResult{Output: output.String(), Err: err, CurrentLocation: svn.GetCurrentLocation(r), CurrentRevision: svn.GetCurrentRevision(r)}
+	})
+}
+
 func checkoutRevisionCmd(r model.Repo, revision string) tea.Cmd {
 	return startStreamingCommand(func(emit func(string)) model.CommandResult {
 		var output strings.Builder
@@ -533,30 +556,14 @@ func parseSVNLocalChangeStatusLine(r model.Repo, line string, includeUnversioned
 	}, true
 }
 
-// neverCommitNames lists path components that should never appear in the commit
-// list — Claude Code files and tool-generated output directories.
-var neverCommitNames = []string{
-	".claude",
-	"CLAUDE.md",
-	"graphify-out",
-	"vendor",
-	"hussar",
-	"vanta",
-}
-
+// shouldHideFromCommitSelect drops paths that must never reach the commit list:
+// the shelf store plus everything named in ~/.config/svn-tui/ignore.txt.
 func shouldHideFromCommitSelect(path string) bool {
 	clean := strings.TrimPrefix(strings.TrimSpace(filepath.ToSlash(path)), "./")
 	if clean == "." || clean == model.ShelvesDir || strings.HasPrefix(clean, model.ShelvesDir+"/") {
 		return true
 	}
-	for _, part := range strings.Split(clean, "/") {
-		for _, name := range neverCommitNames {
-			if part == name {
-				return true
-			}
-		}
-	}
-	return false
+	return svn.Ignores().HidesPath(clean)
 }
 
 // isScheduledDirChange returns true for directories that are newly scheduled
@@ -958,7 +965,9 @@ func copyFile(src, dst string, mode os.FileMode) error {
 
 // ── Conflicts ─────────────────────────────────────────────────────────────────
 
-func resolveSelectedTreeConflictsCmd(r model.Repo, items []model.ConflictItem) tea.Cmd {
+// resolveAllTreeConflictsCmd resolves every tree conflict in turn. SVN cannot
+// take them in one shot, so each path gets its own resolve and its own result.
+func resolveAllTreeConflictsCmd(r model.Repo, items []model.ConflictItem) tea.Cmd {
 	return startStreamingCommand(func(emit func(string)) model.CommandResult {
 		var output strings.Builder
 		line := func(s string) { output.WriteString(s + "\n"); emit(s) }
@@ -992,6 +1001,26 @@ func resolveSelectedTreeConflictsCmd(r model.Repo, items []model.ConflictItem) t
 			CurrentLocation: svn.GetCurrentLocation(r),
 		}
 	})
+}
+
+// resolveConflictAcceptCmd resolves one conflicted path with a fixed --accept
+// value: mine-full keeps the working file, theirs-full takes the incoming one.
+func resolveConflictAcceptCmd(r model.Repo, item model.ConflictItem, accept, label string) tea.Cmd {
+	return func() tea.Msg {
+		var output strings.Builder
+		output.WriteString("Working copy: " + r.Path + "\n")
+		output.WriteString("Conflicted path: " + item.Path + "\n")
+		output.WriteString("Keeping the " + label + "\n")
+		output.WriteString("Running: svn resolve --accept=" + accept + "\n\n")
+
+		out, err := svn.Run(r, "resolve", "--accept="+accept, item.Path)
+		output.WriteString(out)
+		if err != nil {
+			return model.CommandResult{Output: output.String(), Err: err, CurrentLocation: svn.GetCurrentLocation(r)}
+		}
+		output.WriteString("\nConflict resolved: " + item.Path + " now holds the " + label + ".")
+		return model.CommandResult{Output: output.String(), CurrentLocation: svn.GetCurrentLocation(r)}
+	}
 }
 
 func loadConflictItemsCmd(r model.Repo) tea.Cmd {
@@ -1198,13 +1227,14 @@ func searchFileHistoryMatches(r model.Repo, query string, limit int) ([]string, 
 	if limit <= 0 {
 		limit = 300
 	}
+	ignores := svn.Ignores()
 	var exact, contains []string
 	err := filepath.WalkDir(r.Path, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		if d.IsDir() {
-			if d.Name() == ".svn" || d.Name() == ".git" || d.Name() == "node_modules" || d.Name() == "vendor" {
+			if ignores.HidesName(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil

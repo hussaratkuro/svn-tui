@@ -726,18 +726,13 @@ func (m Model) viewConflictSelect() string {
 	var b strings.Builder
 	b.WriteString(m.compactHeader("Resolve conflicts"))
 
-	selectedTree := 0
-	for _, ci := range m.conflictItems {
-		if ci.Selected && ci.IsTree {
-			selectedTree++
-		}
-	}
+	treeCount := len(m.treeConflicts())
 
 	items := max(3, m.listInnerHeight()-6)
 	end := min(len(m.conflictItems), m.conflictOffset+items)
 
 	var c strings.Builder
-	c.WriteString(mutedStyle.Render(fmt.Sprintf("Tree conflicts selected: %d", selectedTree)) + "\n")
+	c.WriteString(mutedStyle.Render(fmt.Sprintf("%d conflict(s), %d of them tree conflicts", len(m.conflictItems), treeCount)) + "\n")
 	c.WriteString(textStyle.Render("Conflicted files:") + "\n")
 	c.WriteString(mutedStyle.Render("─────────────────") + "\n")
 	for i := m.conflictOffset; i < end; i++ {
@@ -747,36 +742,44 @@ func (m Model) viewConflictSelect() string {
 		if isCursor {
 			cursor = ">"
 		}
-		var check string
-		if item.IsTree {
-			if item.Selected {
-				check = checkedStyle.Render("[x]")
-			} else {
-				check = checkboxStyle.Render("[ ]")
-			}
-		} else {
-			check = "   "
-		}
-		line := fmt.Sprintf("%s %s %-10s %s", cursor, check, item.Status, item.Path)
-		if isCursor {
+		line := fmt.Sprintf("%s %-10s %s", cursor, item.Status, item.Path)
+		switch {
+		case isCursor:
 			c.WriteString(selectedStyle.Render(line) + "\n")
-		} else if item.Selected {
-			c.WriteString(checkedStyle.Render(line) + "\n")
-		} else {
+		case item.IsTree && m.resolveConfirm == resolveConfirmAllTree:
+			c.WriteString(warningStyle.Render(line) + "\n")
+		default:
 			c.WriteString(normalStyle.Render(line) + "\n")
 		}
 	}
 	c.WriteString("\n")
-	c.WriteString(warningStyle.Render("File conflicts → Meld (Enter). Tree conflicts → --accept=working (Space+r).") + "\n")
+	c.WriteString(warningStyle.Render("File conflicts → Meld (Enter), keep current (m), take incoming (t). Tree conflicts → --accept=working (r).") + "\n")
 	c.WriteString(mutedStyle.Render(scrollHint(m.conflictOffset, end, len(m.conflictItems))))
 
 	b.WriteString(m.listBox(c.String()))
 
-	hints := []string{hint("↑↓/jk", "move"), hint("Space", "select tree"), hint("a", "all tree"), hint("n", "none")}
-	if selectedTree > 0 {
-		hints = append(hints, hint("r", fmt.Sprintf("resolve %d tree", selectedTree)))
+	switch m.resolveConfirm {
+	case resolveConfirmAllTree:
+		b.WriteString("\n" + warningStyle.Render(fmt.Sprintf("r again: resolve all %d tree conflict(s) with --accept=working — or move cursor to cancel", treeCount)))
+		return b.String()
+	case resolveConfirmMine:
+		b.WriteString("\n" + warningStyle.Render("m again: keep the current file and discard the incoming changes — or move cursor to cancel"))
+		return b.String()
+	case resolveConfirmTheirs:
+		b.WriteString("\n" + warningStyle.Render("t again: take the incoming file and discard your changes — or move cursor to cancel"))
+		return b.String()
+	}
+
+	hints := []string{hint("↑↓/jk", "move")}
+	if treeCount > 0 {
+		hints = append(hints, hint("r", fmt.Sprintf("resolve all %d tree", treeCount)))
 	} else {
-		hints = append(hints, mutedStyle.Render("r: resolve selected tree"))
+		hints = append(hints, mutedStyle.Render("r: resolve all tree"))
+	}
+	if len(m.conflictItems) > 0 && !m.conflictItems[m.conflictCursor].IsTree {
+		hints = append(hints, hint("m", "keep current"), hint("t", "take incoming"))
+	} else {
+		hints = append(hints, mutedStyle.Render("m/t: file conflicts only"))
 	}
 	hints = append(hints, hint("Enter", "Meld"), hint("i", "info"), hint("Esc", "back"))
 	b.WriteString(statusBar(hints...))

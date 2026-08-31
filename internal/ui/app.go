@@ -14,6 +14,17 @@ import (
 	"svn-tui/internal/svn"
 )
 
+// resolveConfirmKind tracks which destructive resolve is armed and waiting for
+// a second key press on the conflict screen.
+type resolveConfirmKind int
+
+const (
+	resolveConfirmNone resolveConfirmKind = iota
+	resolveConfirmAllTree
+	resolveConfirmMine
+	resolveConfirmTheirs
+)
+
 // Model is the main bubbletea model.
 type Model struct {
 	screen model.Screen
@@ -60,6 +71,7 @@ type Model struct {
 	conflictItems  []model.ConflictItem
 	conflictCursor int
 	conflictOffset int
+	resolveConfirm resolveConfirmKind
 
 	input    textinput.Model
 	viewport viewport.Model
@@ -96,7 +108,7 @@ func NewModel(repos []model.Repo) Model {
 			"Pull", "Status", "Revert files", "Commit",
 			"Create branch", "Switch to branch", "Merge branch",
 			"Shelve local changes", "Unshelve changes", "Switch to trunk",
-			"Checkout revision", "Resolve conflicts",
+			"Checkout revision", "Resolve conflicts", "Cleanup",
 			"Commit history", "File history", "Revision tree", "Quit",
 		},
 		input:            input,
@@ -235,6 +247,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.conflictItems = msg.Items
 		m.conflictCursor, m.conflictOffset = 0, 0
+		m.resolveConfirm = resolveConfirmNone
 		m.screen = model.ScreenConflictSelect
 		return m, nil
 
@@ -742,6 +755,9 @@ func (m Model) updateActionSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case model.ActionResolveConflicts:
 			m.screen, m.runningTitle = model.ScreenRunning, "Loading conflicts..."
 			return m, loadConflictItemsCmd(m.activeRepo)
+		case model.ActionCleanup:
+			m.screen, m.runningTitle = model.ScreenRunning, "Cleaning up working copy..."
+			return m, cleanupCmd(m.activeRepo)
 		case model.ActionCommitHistory:
 			m.screen, m.runningTitle = model.ScreenRunning, "Loading commit history..."
 			return m, loadHistoryCmd(m.activeRepo)
@@ -1263,35 +1279,45 @@ func (m Model) updateCommitMessageInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) updateConflictSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	visible := m.visibleListCount(12)
+	prevCursor := m.conflictCursor
 	m.conflictCursor = navigateCursor(m.conflictCursor, len(m.conflictItems), visible, msg.String())
+	if m.conflictCursor != prevCursor {
+		m.resolveConfirm = resolveConfirmNone
+	}
 
 	switch msg.String() {
-	case " ":
-		if len(m.conflictItems) > 0 && m.conflictItems[m.conflictCursor].IsTree {
-			m.conflictItems[m.conflictCursor].Selected = !m.conflictItems[m.conflictCursor].Selected
-		}
-	case "a":
-		for i := range m.conflictItems {
-			if m.conflictItems[i].IsTree {
-				m.conflictItems[i].Selected = true
-			}
-		}
-	case "n":
-		for i := range m.conflictItems {
-			m.conflictItems[i].Selected = false
-		}
 	case "r":
-		var selected []model.ConflictItem
-		for _, item := range m.conflictItems {
-			if item.Selected && item.IsTree {
-				selected = append(selected, item)
-			}
-		}
-		if len(selected) == 0 {
+		// Tree conflicts are resolved one path at a time, so "r" runs the whole
+		// batch. Arm on the first press, run on the second.
+		tree := m.treeConflicts()
+		if len(tree) == 0 {
 			break
 		}
-		m.screen, m.runningTitle = model.ScreenRunning, fmt.Sprintf("Resolving %d tree conflict(s)...", len(selected))
-		return m, resolveSelectedTreeConflictsCmd(m.activeRepo, selected)
+		if m.resolveConfirm != resolveConfirmAllTree {
+			m.resolveConfirm = resolveConfirmAllTree
+			break
+		}
+		m.resolveConfirm = resolveConfirmNone
+		m.screen, m.runningTitle = model.ScreenRunning, fmt.Sprintf("Resolving %d tree conflict(s)...", len(tree))
+		return m, resolveAllTreeConflictsCmd(m.activeRepo, tree)
+	case "m", "t":
+		// Whole-file resolve for the path under the cursor: keep mine, or take
+		// theirs. Tree conflicts only accept --accept=working, so they use "r".
+		if len(m.conflictItems) == 0 || m.conflictItems[m.conflictCursor].IsTree {
+			break
+		}
+		item := m.conflictItems[m.conflictCursor]
+		want, accept, label := resolveConfirmMine, "mine-full", "current file"
+		if msg.String() == "t" {
+			want, accept, label = resolveConfirmTheirs, "theirs-full", "incoming file"
+		}
+		if m.resolveConfirm != want {
+			m.resolveConfirm = want
+			break
+		}
+		m.resolveConfirm = resolveConfirmNone
+		m.screen, m.runningTitle = model.ScreenRunning, "Keeping the "+label+" for "+item.Path+"..."
+		return m, resolveConflictAcceptCmd(m.activeRepo, item, accept, label)
 	case "enter":
 		if len(m.conflictItems) > 0 {
 			item := m.conflictItems[m.conflictCursor]
@@ -1302,6 +1328,17 @@ func (m Model) updateConflictSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	m.conflictOffset = adjustOffset(m.conflictOffset, m.conflictCursor, visible)
 	return m, nil
+}
+
+// treeConflicts returns every tree conflict in the loaded conflict list.
+func (m Model) treeConflicts() []model.ConflictItem {
+	var tree []model.ConflictItem
+	for _, item := range m.conflictItems {
+		if item.IsTree {
+			tree = append(tree, item)
+		}
+	}
+	return tree
 }
 
 // ── List helpers ──────────────────────────────────────────────────────────────

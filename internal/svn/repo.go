@@ -16,11 +16,8 @@ import (
 func LoadRepos() []model.Repo {
 	var configs []model.RepoConfig
 
-	if configDir, err := os.UserConfigDir(); err == nil {
-		configs = append(configs, loadConfigFile(filepath.Join(configDir, "svn-tui", "repo.txt"))...)
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		configs = append(configs, loadConfigFile(filepath.Join(home, ".config", "svn-tui", "repo.txt"))...)
+	for _, path := range configFilePaths("repo.txt") {
+		configs = append(configs, loadConfigFile(path)...)
 	}
 
 	if len(configs) == 0 {
@@ -58,6 +55,26 @@ func LoadRepos() []model.Repo {
 		}
 	}
 	return repos
+}
+
+// configFilePaths returns the candidate locations of a config file, in the
+// order they are read.
+func configFilePaths(name string) []string {
+	var paths []string
+	seen := map[string]bool{}
+	add := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			paths = append(paths, p)
+		}
+	}
+	if configDir, err := os.UserConfigDir(); err == nil {
+		add(filepath.Join(configDir, "svn-tui", name))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		add(filepath.Join(home, ".config", "svn-tui", name))
+	}
+	return paths
 }
 
 func loadConfigFile(path string) []model.RepoConfig {
@@ -250,6 +267,14 @@ Example:
 Important:
 
   chmod 600 ~/.config/svn-tui/repo.txt
+
+Hidden files (never listed for commit):
+
+  ~/.config/svn-tui/ignore.txt
+
+  name=vendor
+  name=node_modules
+  path=some/dir/generated.php
 
 Meld conflict resolve requires:
 

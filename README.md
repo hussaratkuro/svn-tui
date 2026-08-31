@@ -107,10 +107,33 @@ The UI warns that a later Pull action updates the working copy back to `HEAD`.
 
 Lists conflicts from `svn status`.
 
-- file conflicts are opened with Meld
-- tree conflicts are resolved with `--accept=working`
+- file conflicts are opened with Meld (`Enter`)
+- file conflicts can also be resolved whole-file, without Meld:
+  - `m` keeps the current file — `svn resolve --accept=mine-full`
+  - `t` takes the incoming file — `svn resolve --accept=theirs-full`
+- tree conflicts are resolved with `--accept=working` (`r`)
+
+`m` and `t` act on the file under the cursor and are offered for file conflicts
+only, since tree conflicts accept `working`. Both arm on the first press and run
+on the second, the same as `r`.
+
+Tree conflicts cannot be resolved in a single SVN call, so there is no per-file
+selection for them. `r` resolves every tree conflict in the list, one path at a
+time, and reports each path separately. Press `r` once to arm it, `r` again to
+run it; moving the cursor cancels.
 
 Meld support expects `meld` to be installed and available in `PATH`.
+
+### Cleanup
+
+Runs:
+
+```bash
+svn cleanup
+```
+
+Releases stale working-copy locks and rolls back unfinished operations, for when
+SVN insists the working copy is locked.
 
 ### Commit history
 
@@ -242,6 +265,46 @@ Supported config keys:
 | `username`, `user` | SVN username |
 | `password`, `pass` | SVN password |
 | `branch_username`, `branch_user`, `branchname_user` | Username part used when creating branches |
+
+## Hidden files
+
+Files that should never show up in the commit list are configured at:
+
+```text
+~/.config/svn-tui/ignore.txt
+```
+
+```ini
+# hides every matching path component, at any depth
+name=.svn
+name=.git
+name=node_modules
+name=vendor
+name=.claude
+name=CLAUDE.md
+name=graphify-out
+
+# hides one exact working-copy-relative path
+path=Workspace/Web/project/modul/_html.php
+
+# bare lines work too: a line with "/" is a path, anything else is a name
+build/generated/version.php
+```
+
+Supported keys:
+
+| Key | Description |
+| --- | --- |
+| `name`, `names`, `dir`, `file` | Path component hidden anywhere in the working copy |
+| `path`, `paths` | Exact working-copy-relative path |
+
+Nothing is hidden without this file, so `ignore.txt` in the repository root is a
+ready-made starting point — copy it to `~/.config/svn-tui/ignore.txt`. The same
+names also tell the file history search which directories to skip, so keeping
+`.svn` and `.git` in the list is worth it.
+
+The shelf store (`.svn-tui-shelves`) is hidden by the tool itself and needs no
+config entry.
 
 ## Alternative repository discovery
 
