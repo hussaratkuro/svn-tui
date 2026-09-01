@@ -36,10 +36,12 @@ type Model struct {
 	repoOffset int
 	activeRepo model.Repo
 
-	actions        []string
-	actionCursor   int
-	actionOffset   int
-	selectedAction model.Action
+	actions          []string
+	actionCursor     int
+	actionOffset     int
+	actionFilter     string
+	actionFilterMode bool
+	selectedAction   model.Action
 
 	branches          []model.Branch
 	branchCursor      int
@@ -48,16 +50,30 @@ type Model struct {
 	branchFilter      string
 	branchFilterMode  bool
 
-	shelves     []string
-	shelfCursor int
-	shelfOffset int
+	shelves        []string
+	shelfCursor    int
+	shelfOffset    int
+	shelfDeleteIdx int
 
 	fileHistoryQuery  string
 	fileHistoryItems  []string
 	fileHistoryCursor int
 	fileHistoryOffset int
 
+	propertyTargets      []string
+	propertyTargetCursor int
+	propertyTargetOffset int
+	propertyTarget       string
+	propertyItems        []model.PropertyItem
+	propertyCursor       int
+	propertyOffset       int
+	propertyName         string
+	propertyEditing      bool
+	propertyDeleteIdx    int
+	propertyNotice       string
+
 	commitItems      []model.CommitItem
+	commitConflicts  []string
 	commitCursor     int
 	commitOffset     int
 	deleteConfirmIdx int
@@ -108,13 +124,15 @@ func NewModel(repos []model.Repo) Model {
 			"Pull", "Status", "Revert files", "Commit",
 			"Create branch", "Switch to branch", "Merge branch",
 			"Shelve local changes", "Unshelve changes", "Switch to trunk",
-			"Checkout revision", "Resolve conflicts", "Cleanup",
+			"Checkout revision", "Resolve conflicts", "Cleanup", "Properties",
 			"Commit history", "File history", "Revision tree", "Quit",
 		},
-		input:            input,
-		viewport:         vp,
-		runningPinTail:   true,
-		deleteConfirmIdx: -1,
+		input:             input,
+		viewport:          vp,
+		runningPinTail:    true,
+		deleteConfirmIdx:  -1,
+		shelfDeleteIdx:    -1,
+		propertyDeleteIdx: -1,
 	}
 
 	if len(repos) == 0 {
@@ -178,7 +196,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.shelves = msg.Shelves
 		m.shelfCursor, m.shelfOffset = 0, 0
+		m.shelfDeleteIdx = -1
 		m.screen = model.ScreenShelfSelect
+		return m, nil
+
+	case model.PropertyTargetsLoadedMsg:
+		if msg.Err != nil {
+			return m.showError("Failed to search paths.", msg.Err.Error()), nil
+		}
+		if len(msg.Items) == 0 {
+			return m.showError("No path matches "+msg.Query+".", "no property target found"), nil
+		}
+		m.propertyTargets = msg.Items
+		m.propertyTargetCursor, m.propertyTargetOffset = 0, 0
+		m.screen = model.ScreenPropertyTargetSelect
+		return m, nil
+
+	case model.PropertiesLoadedMsg:
+		if msg.Err != nil {
+			return m.showError("Failed to read properties of "+msg.Target+".", msg.Err.Error()), nil
+		}
+		m.propertyTarget = msg.Target
+		m.propertyItems = msg.Items
+		m.propertyNotice = msg.Notice
+		m.propertyDeleteIdx = -1
+		m.propertyCursor = clamp(m.propertyCursor, 0, max(0, len(msg.Items)-1))
+		m.propertyOffset = adjustOffset(m.propertyOffset, m.propertyCursor, m.visibleListCount(10))
+		m.screen = model.ScreenPropertyList
 		return m, nil
 
 	case model.PullItemsLoadedMsg:
@@ -203,10 +247,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(msg.Items) == 0 {
 			m.screen = model.ScreenResult
 			m.result = "No committable changes found."
+			if len(msg.Conflicted) > 0 {
+				m.result += "\n\nStill in conflict, resolve these first:\n  " +
+					strings.Join(msg.Conflicted, "\n  ")
+			}
 			m.viewport.SetContent(m.result)
 			return m, nil
 		}
 		m.commitItems = msg.Items
+		m.commitConflicts = msg.Conflicted
 		m.commitCursor, m.commitOffset = 0, 0
 		m.deleteConfirmIdx = -1
 		m.screen = model.ScreenCommitSelect
@@ -502,6 +551,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case model.ScreenRepoSelect:
 			return m, tea.Quit
 		case model.ScreenActionSelect:
+			if m.actionFilterMode {
+				m.actionFilter, m.actionFilterMode = "", false
+				m.actionCursor, m.actionOffset = 0, 0
+				return m, nil
+			}
 			m.screen = model.ScreenRepoSelect
 		case model.ScreenDiff:
 			switch m.selectedAction {
@@ -522,6 +576,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case model.ScreenHistorySearch:
 			m.screen = model.ScreenHistory
+		case model.ScreenPropertyTargetSelect:
+			m.input.Focus()
+			m.screen = model.ScreenPropertyTargetInput
+		case model.ScreenPropertyList:
+			if len(m.propertyTargets) > 0 {
+				m.screen = model.ScreenPropertyTargetSelect
+			} else {
+				m.input.Focus()
+				m.screen = model.ScreenPropertyTargetInput
+			}
+		case model.ScreenPropertyNameInput, model.ScreenPropertyValueInput:
+			m.propertyEditing = false
+			m.screen = model.ScreenPropertyList
 		default:
 			m.screen = model.ScreenActionSelect
 		}
@@ -541,6 +608,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateFileHistorySearch(msg)
 	case model.ScreenFileHistorySelect:
 		return m.updateFileHistorySelect(msg)
+	case model.ScreenPropertyTargetInput:
+		return m.updatePropertyTargetInput(msg)
+	case model.ScreenPropertyTargetSelect:
+		return m.updatePropertyTargetSelect(msg)
+	case model.ScreenPropertyList:
+		return m.updatePropertyList(msg)
+	case model.ScreenPropertyNameInput:
+		return m.updatePropertyNameInput(msg)
+	case model.ScreenPropertyValueInput:
+		return m.updatePropertyValueInput(msg)
 	case model.ScreenBranchSelect:
 		return m.updateBranchSelect(msg)
 	case model.ScreenShelfSelect:
@@ -710,71 +787,147 @@ func (m Model) updateRepoSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) updateActionSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	visible := m.visibleListCount(10)
-	m.actionCursor = navigateCursor(m.actionCursor, len(m.actions), visible, msg.String())
+	key := msg.String()
+	filtered := m.filteredActionIndexes()
 
-	if msg.String() == "enter" {
-		m.selectedAction = model.Action(m.actionCursor)
-		switch m.selectedAction {
-		case model.ActionPull:
-			m.screen, m.runningTitle = model.ScreenRunning, "Loading incoming pull changes..."
-			return m, loadPullItemsCmd(m.activeRepo)
-		case model.ActionStatus:
-			m.screen, m.runningTitle = model.ScreenRunning, "Loading status..."
-			return m, statusCmd(m.activeRepo)
-		case model.ActionRevertFiles:
-			m.screen, m.runningTitle = model.ScreenRunning, "Loading revertable files..."
-			return m, loadRevertItemsCmd(m.activeRepo)
-		case model.ActionCheckoutRevision:
-			m.input.Reset()
-			m.input.Placeholder = "Revision number, e.g. 12345"
-			m.input.Focus()
-			m.screen = model.ScreenCheckoutRevisionInput
-		case model.ActionCreateBranch:
-			m.input.Reset()
-			m.input.Placeholder = "e.g. ASD-123 or create-branch-test"
-			m.input.Focus()
-			m.screen = model.ScreenCreateBranchInput
-		case model.ActionSwitchBranch:
-			m.screen, m.runningTitle = model.ScreenRunning, "Loading branches..."
-			return m, loadBranchesCmd(m.activeRepo)
-		case model.ActionMergeBranch:
-			m.screen, m.runningTitle = model.ScreenRunning, "Loading branches..."
-			return m, loadBranchesCmd(m.activeRepo)
-		case model.ActionShelveChanges:
-			m.screen, m.runningTitle = model.ScreenRunning, "Loading local changes to shelve..."
-			return m, loadShelveItemsCmd(m.activeRepo)
-		case model.ActionUnshelveChanges:
-			m.screen, m.runningTitle = model.ScreenRunning, "Loading shelves..."
-			return m, loadShelvesCmd(m.activeRepo)
-		case model.ActionSwitchTrunk:
-			m.screen, m.runningTitle = model.ScreenRunning, "Switching to trunk..."
-			return m, switchTrunkCmd(m.activeRepo)
-		case model.ActionCommit:
-			m.screen, m.runningTitle = model.ScreenRunning, "Loading working copy changes..."
-			return m, loadCommitItemsCmd(m.activeRepo)
-		case model.ActionResolveConflicts:
-			m.screen, m.runningTitle = model.ScreenRunning, "Loading conflicts..."
-			return m, loadConflictItemsCmd(m.activeRepo)
-		case model.ActionCleanup:
-			m.screen, m.runningTitle = model.ScreenRunning, "Cleaning up working copy..."
-			return m, cleanupCmd(m.activeRepo)
-		case model.ActionCommitHistory:
-			m.screen, m.runningTitle = model.ScreenRunning, "Loading commit history..."
-			return m, loadHistoryCmd(m.activeRepo)
-		case model.ActionFileHistory:
-			m.input.Reset()
-			m.input.Placeholder = "Search file path, e.g. action.php or inc/config"
-			m.input.Focus()
-			m.screen = model.ScreenFileHistorySearch
-		case model.ActionRevisionTree:
-			m.screen, m.runningTitle = model.ScreenRunning, "Building ASCII revision tree..."
-			return m, loadRevisionTreeCmd(m.activeRepo, false)
-		case model.ActionQuit:
-			return m, tea.Quit
+	if m.actionFilterMode {
+		switch key {
+		case "enter":
+			if len(filtered) == 0 {
+				break
+			}
+			return m.runAction(model.Action(filtered[m.actionCursor]))
+		case "backspace", "ctrl+h":
+			if len(m.actionFilter) > 0 {
+				m.actionFilter = m.actionFilter[:len(m.actionFilter)-1]
+				m.actionCursor, m.actionOffset = 0, 0
+			}
+		case "up", "k", "down", "j", "pgup", "pgdown", "home", "end":
+			m.actionCursor = navigateCursor(m.actionCursor, len(filtered), visible, key)
+		default:
+			if len(key) == 1 && key >= " " {
+				m.actionFilter += key
+				m.actionCursor, m.actionOffset = 0, 0
+			}
 		}
+		filtered = m.filteredActionIndexes()
+		m.actionCursor = clamp(m.actionCursor, 0, max(0, len(filtered)-1))
+		m.actionOffset = adjustOffset(m.actionOffset, m.actionCursor, visible)
+		return m, nil
+	}
+
+	m.actionCursor = navigateCursor(m.actionCursor, len(filtered), visible, key)
+
+	switch key {
+	case "/":
+		m.actionFilterMode = true
+		m.actionFilter = ""
+		m.actionCursor, m.actionOffset = 0, 0
+	case "enter":
+		if len(filtered) == 0 {
+			break
+		}
+		return m.runAction(model.Action(filtered[m.actionCursor]))
 	}
 
 	m.actionOffset = adjustOffset(m.actionOffset, m.actionCursor, visible)
+	return m, nil
+}
+
+// filteredActionIndexes returns the positions in m.actions matching the search
+// text. The position is the action itself, so the cursor always maps back to
+// the right model.Action even while the list is filtered.
+func (m Model) filteredActionIndexes() []int {
+	if strings.TrimSpace(m.actionFilter) == "" {
+		all := make([]int, len(m.actions))
+		for i := range m.actions {
+			all[i] = i
+		}
+		return all
+	}
+	filter := strings.ToLower(m.actionFilter)
+	var result []int
+	for i, name := range m.actions {
+		if strings.Contains(strings.ToLower(name), filter) {
+			result = append(result, i)
+		}
+	}
+	return result
+}
+
+// runAction starts one action and drops any active search, so coming back from
+// it shows the whole menu with the cursor on what was just run.
+func (m Model) runAction(action model.Action) (tea.Model, tea.Cmd) {
+	m.selectedAction = action
+	m.actionFilter, m.actionFilterMode = "", false
+	m.actionCursor = int(action)
+	m.actionOffset = adjustOffset(0, m.actionCursor, m.visibleListCount(10))
+
+	switch m.selectedAction {
+	case model.ActionPull:
+		m.screen, m.runningTitle = model.ScreenRunning, "Loading incoming pull changes..."
+		return m, loadPullItemsCmd(m.activeRepo)
+	case model.ActionStatus:
+		m.screen, m.runningTitle = model.ScreenRunning, "Loading status..."
+		return m, statusCmd(m.activeRepo)
+	case model.ActionRevertFiles:
+		m.screen, m.runningTitle = model.ScreenRunning, "Loading revertable files..."
+		return m, loadRevertItemsCmd(m.activeRepo)
+	case model.ActionCheckoutRevision:
+		m.input.Reset()
+		m.input.Placeholder = "Revision number, e.g. 12345"
+		m.input.Focus()
+		m.screen = model.ScreenCheckoutRevisionInput
+	case model.ActionCreateBranch:
+		m.input.Reset()
+		m.input.Placeholder = "e.g. ASD-123 or create-branch-test"
+		m.input.Focus()
+		m.screen = model.ScreenCreateBranchInput
+	case model.ActionSwitchBranch:
+		m.screen, m.runningTitle = model.ScreenRunning, "Loading branches..."
+		return m, loadBranchesCmd(m.activeRepo)
+	case model.ActionMergeBranch:
+		m.screen, m.runningTitle = model.ScreenRunning, "Loading branches..."
+		return m, loadBranchesCmd(m.activeRepo)
+	case model.ActionShelveChanges:
+		m.screen, m.runningTitle = model.ScreenRunning, "Loading local changes to shelve..."
+		return m, loadShelveItemsCmd(m.activeRepo)
+	case model.ActionUnshelveChanges:
+		m.screen, m.runningTitle = model.ScreenRunning, "Loading shelves..."
+		return m, loadShelvesCmd(m.activeRepo)
+	case model.ActionSwitchTrunk:
+		m.screen, m.runningTitle = model.ScreenRunning, "Switching to trunk..."
+		return m, switchTrunkCmd(m.activeRepo)
+	case model.ActionCommit:
+		m.screen, m.runningTitle = model.ScreenRunning, "Loading working copy changes..."
+		return m, loadCommitItemsCmd(m.activeRepo)
+	case model.ActionResolveConflicts:
+		m.screen, m.runningTitle = model.ScreenRunning, "Loading conflicts..."
+		return m, loadConflictItemsCmd(m.activeRepo)
+	case model.ActionCleanup:
+		m.screen, m.runningTitle = model.ScreenRunning, "Cleaning up working copy..."
+		return m, cleanupCmd(m.activeRepo)
+	case model.ActionProperties:
+		m.input.Reset()
+		m.input.Placeholder = "Path to inspect, empty = working copy root"
+		m.input.Focus()
+		m.propertyTarget, m.propertyNotice = "", ""
+		m.screen = model.ScreenPropertyTargetInput
+	case model.ActionCommitHistory:
+		m.screen, m.runningTitle = model.ScreenRunning, "Loading commit history..."
+		return m, loadHistoryCmd(m.activeRepo)
+	case model.ActionFileHistory:
+		m.input.Reset()
+		m.input.Placeholder = "Search file path, e.g. action.php or inc/config"
+		m.input.Focus()
+		m.screen = model.ScreenFileHistorySearch
+	case model.ActionRevisionTree:
+		m.screen, m.runningTitle = model.ScreenRunning, "Building ASCII revision tree..."
+		return m, loadRevisionTreeCmd(m.activeRepo, false)
+	case model.ActionQuit:
+		return m, tea.Quit
+	}
+
 	return m, nil
 }
 
@@ -948,12 +1101,36 @@ func (m Model) updateBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) updateShelfSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	visible := m.visibleListCount(7)
+	prevCursor := m.shelfCursor
 	m.shelfCursor = navigateCursor(m.shelfCursor, len(m.shelves), visible, msg.String())
+	if m.shelfCursor != prevCursor {
+		m.shelfDeleteIdx = -1
+	}
 
-	if msg.String() == "enter" && len(m.shelves) > 0 {
-		selected := m.shelves[m.shelfCursor]
+	switch msg.String() {
+	case "enter":
+		if len(m.shelves) == 0 {
+			break
+		}
 		m.screen, m.runningTitle = model.ScreenRunning, "Unshelving changes..."
-		return m, unshelveChangesCmd(m.activeRepo, selected)
+		return m, unshelveChangesCmd(m.activeRepo, m.shelves[m.shelfCursor])
+	case "delete":
+		// Deleting a shelf discards saved changes for good, so it arms on the
+		// first press and runs on the second.
+		if len(m.shelves) == 0 {
+			break
+		}
+		if m.shelfDeleteIdx != m.shelfCursor {
+			m.shelfDeleteIdx = m.shelfCursor
+			break
+		}
+		name := m.shelves[m.shelfCursor]
+		m.shelfDeleteIdx = -1
+		if err := deleteShelf(m.activeRepo, name); err != nil {
+			return m.showError("Failed to delete shelf "+name+".", err.Error()), nil
+		}
+		m.screen, m.runningTitle = model.ScreenRunning, "Deleting shelf "+name+"..."
+		return m, loadShelvesCmd(m.activeRepo)
 	}
 
 	m.shelfOffset = adjustOffset(m.shelfOffset, m.shelfCursor, visible)
@@ -1242,12 +1419,12 @@ func (m Model) updateRevertSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, diffCmd(m.activeRepo, m.commitItems[m.commitCursor], m.width-4)
 		}
 	case "enter":
-		paths := selectedCommitPaths(m.commitItems)
-		if len(paths) == 0 {
+		selected := selectedCommitItems(m.commitItems)
+		if len(selected) == 0 {
 			return m.showError("Select at least one file with Space before reverting.", "no files selected"), nil
 		}
 		m.screen, m.runningTitle = model.ScreenRunning, "Reverting selected files..."
-		return m, revertCmd(m.activeRepo, paths)
+		return m, revertCmd(m.activeRepo, selected)
 	}
 
 	m.commitOffset = adjustOffset(m.commitOffset, m.commitCursor, visible)
@@ -1341,6 +1518,120 @@ func (m Model) treeConflicts() []model.ConflictItem {
 	return tree
 }
 
+func (m Model) updatePropertyTargetInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "enter" {
+		query := strings.TrimSpace(m.input.Value())
+		if query == "" {
+			// Empty search goes straight to the working copy root, which is
+			// where a merge records its mergeinfo.
+			m.propertyTargets = nil
+			m.propertyCursor, m.propertyOffset = 0, 0
+			m.screen, m.runningTitle = model.ScreenRunning, "Reading properties of the working copy root..."
+			return m, loadPropertiesCmd(m.activeRepo, ".", "")
+		}
+		m.screen, m.runningTitle = model.ScreenRunning, "Searching paths..."
+		return m, searchPropertyTargetsCmd(m.activeRepo, query)
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+func (m Model) updatePropertyTargetSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visible := m.visibleListCount(10)
+	m.propertyTargetCursor = navigateCursor(m.propertyTargetCursor, len(m.propertyTargets), visible, msg.String())
+
+	if msg.String() == "enter" && len(m.propertyTargets) > 0 {
+		target := m.propertyTargets[m.propertyTargetCursor]
+		m.propertyCursor, m.propertyOffset = 0, 0
+		m.screen, m.runningTitle = model.ScreenRunning, "Reading properties of "+target+"..."
+		return m, loadPropertiesCmd(m.activeRepo, target, "")
+	}
+
+	m.propertyTargetOffset = adjustOffset(m.propertyTargetOffset, m.propertyTargetCursor, visible)
+	return m, nil
+}
+
+func (m Model) updatePropertyList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visible := m.visibleListCount(12)
+	prevCursor := m.propertyCursor
+	m.propertyCursor = navigateCursor(m.propertyCursor, len(m.propertyItems), visible, msg.String())
+	if m.propertyCursor != prevCursor {
+		m.propertyDeleteIdx = -1
+	}
+
+	switch msg.String() {
+	case "a":
+		m.propertyEditing = false
+		m.propertyName = ""
+		m.propertyNotice = ""
+		m.input.Reset()
+		m.input.Placeholder = "Property name, e.g. svn:ignore"
+		m.input.Focus()
+		m.screen = model.ScreenPropertyNameInput
+	case "e", "enter":
+		if len(m.propertyItems) == 0 {
+			break
+		}
+		item := m.propertyItems[m.propertyCursor]
+		m.propertyEditing = true
+		m.propertyName = item.Name
+		m.propertyNotice = ""
+		m.input.Reset()
+		m.input.SetValue(collapsePropertyValue(item.Value))
+		m.input.Placeholder = "Property value"
+		m.input.Focus()
+		m.screen = model.ScreenPropertyValueInput
+	case "delete":
+		if len(m.propertyItems) == 0 {
+			break
+		}
+		if m.propertyDeleteIdx != m.propertyCursor {
+			m.propertyDeleteIdx = m.propertyCursor
+			break
+		}
+		name := m.propertyItems[m.propertyCursor].Name
+		m.propertyDeleteIdx = -1
+		m.screen, m.runningTitle = model.ScreenRunning, "Deleting "+name+"..."
+		return m, deletePropertyCmd(m.activeRepo, m.propertyTarget, name)
+	}
+
+	m.propertyOffset = adjustOffset(m.propertyOffset, m.propertyCursor, visible)
+	return m, nil
+}
+
+func (m Model) updatePropertyNameInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "enter" {
+		name := strings.TrimSpace(m.input.Value())
+		if name == "" {
+			return m.showError("Please enter a property name, e.g. svn:ignore.", "property name is required"), nil
+		}
+		m.propertyName = name
+		m.input.Reset()
+		m.input.Placeholder = `Property value (
+ makes a new line)`
+		m.input.Focus()
+		m.screen = model.ScreenPropertyValueInput
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+func (m Model) updatePropertyValueInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "enter" {
+		value := expandPropertyValue(m.input.Value())
+		name := m.propertyName
+		m.propertyEditing = false
+		m.screen, m.runningTitle = model.ScreenRunning, "Setting "+name+"..."
+		return m, setPropertyCmd(m.activeRepo, m.propertyTarget, name, value)
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
 // ── List helpers ──────────────────────────────────────────────────────────────
 
 func (m Model) visibleListCount(reservedLines int) int {
@@ -1366,7 +1657,7 @@ func (m Model) headerLines() int {
 }
 
 func (m Model) inputActive() bool {
-	if m.branchFilterMode {
+	if m.branchFilterMode || m.actionFilterMode {
 		return true
 	}
 	switch m.screen {
@@ -1374,7 +1665,10 @@ func (m Model) inputActive() bool {
 		model.ScreenCheckoutRevisionInput,
 		model.ScreenCommitMessageInput,
 		model.ScreenFileHistorySearch,
-		model.ScreenHistorySearch:
+		model.ScreenHistorySearch,
+		model.ScreenPropertyTargetInput,
+		model.ScreenPropertyNameInput,
+		model.ScreenPropertyValueInput:
 		return true
 	}
 	return false

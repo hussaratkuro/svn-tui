@@ -29,11 +29,18 @@ func buildSideBySideDiff(r model.Repo, item model.CommitItem, width int) (string
 	rightWidth := max(24, cellSpace-leftWidth)
 
 	if isLikelyDir(r, item.Path) {
-		out, err := svn.Run(r, "diff", "--", item.Path)
+		// --depth empty shows exactly what committing this entry would send:
+		// the directory's own node and properties, not the local changes of
+		// files below it. (SVN still carries a copied directory recursively.)
+		out, err := svn.Run(r, "diff", "--depth", "empty", "--", item.Path)
 		if err != nil {
 			return "", err
 		}
-		return "Directory diff uses unified SVN diff output:\n\n" + colorizeUnifiedDiff(out), nil
+		header := "Directory diff — this is what a commit of this entry would send:\n\n"
+		if strings.TrimSpace(out) == "" {
+			return header + "(no change of its own)", nil
+		}
+		return header + colorizeUnifiedDiff(out), nil
 	}
 
 	var oldText, newText string

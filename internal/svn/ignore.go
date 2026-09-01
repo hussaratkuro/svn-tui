@@ -14,8 +14,9 @@ type IgnoreRules struct {
 	// Names are path components hidden anywhere in the working copy, so
 	// "vendor" hides vendor/ at any depth.
 	Names []string
-	// Paths are exact working-copy-relative paths. Unlike Names these hide
-	// only that one file rather than every file sharing its basename.
+	// Paths are working-copy-relative paths. Unlike Names, which match a
+	// component anywhere, a path hides that one entry — and, when it names a
+	// directory, everything under it.
 	Paths []string
 }
 
@@ -50,12 +51,13 @@ func (ir IgnoreRules) HidesName(name string) bool {
 	return false
 }
 
-// HidesPath reports whether a working-copy-relative path is ignored, either by
-// an exact path rule or because any of its components is an ignored name.
+// HidesPath reports whether a working-copy-relative path is ignored: by a path
+// rule naming it or one of its parent directories, or because any of its
+// components is an ignored name.
 func (ir IgnoreRules) HidesPath(path string) bool {
 	clean := strings.TrimPrefix(strings.TrimSpace(filepath.ToSlash(path)), "./")
 	for _, p := range ir.Paths {
-		if clean == p {
+		if clean == p || strings.HasPrefix(clean, p+"/") {
 			return true
 		}
 	}

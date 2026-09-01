@@ -463,19 +463,30 @@ func checkoutRevisionCmd(r model.Repo, revision string) tea.Cmd {
 
 func loadCommitItemsCmd(r model.Repo) tea.Cmd {
 	return func() tea.Msg {
-		items, err := loadCommitItems(r, true)
-		if err == nil {
-			items = filterSelectFilesOnly(r, items)
+		items, hidden, err := loadCommitItems(r, true)
+		if err != nil {
+			return model.CommitItemsLoadedMsg{Err: err}
 		}
-		return model.CommitItemsLoadedMsg{Items: items, Err: err}
+		// SVN aborts a commit that names a path still in conflict (E155015), so
+		// those belong on the Resolve conflicts screen, not here.
+		var committable []model.CommitItem
+		var conflicted []string
+		for _, item := range filterSelectFilesOnly(r, items, hidden) {
+			if item.Conflicted {
+				conflicted = append(conflicted, item.Path)
+				continue
+			}
+			committable = append(committable, item)
+		}
+		return model.CommitItemsLoadedMsg{Items: committable, Conflicted: conflicted}
 	}
 }
 
 func loadRevertItemsCmd(r model.Repo) tea.Cmd {
 	return func() tea.Msg {
-		items, err := loadCommitItems(r, false)
+		items, hidden, err := loadCommitItems(r, false)
 		if err == nil {
-			items = filterSelectFilesOnly(r, items)
+			items = filterSelectFilesOnly(r, items, hidden)
 		}
 		return model.RevertItemsLoadedMsg{Items: items, Err: err}
 	}
@@ -483,19 +494,43 @@ func loadRevertItemsCmd(r model.Repo) tea.Cmd {
 
 func loadShelveItemsCmd(r model.Repo) tea.Cmd {
 	return func() tea.Msg {
-		items, err := loadCommitItems(r, true)
+		items, _, err := loadCommitItems(r, true)
+		if err == nil {
+			items = filterShelveFilesOnly(r, items)
+		}
 		return model.RevertItemsLoadedMsg{Items: items, Err: err}
 	}
 }
 
-func loadCommitItems(r model.Repo, includeUnversioned bool) ([]model.CommitItem, error) {
+// filterShelveFilesOnly drops versioned directories. A shelf is a patch plus
+// copies of unversioned paths: svn diff cannot express a directory-only change,
+// and svn revert refuses a scheduled directory without its children. Unversioned
+// directories stay — those are copied and removed wholesale.
+func filterShelveFilesOnly(r model.Repo, items []model.CommitItem) []model.CommitItem {
+	filtered := make([]model.CommitItem, 0, len(items))
+	for _, item := range items {
+		item.IsDir = item.IsDir || isSVNDir(r, item.Path)
+		if item.IsDir && !item.Unversioned {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
+}
+
+// loadCommitItems returns the visible local changes plus the paths ignore.txt
+// hides, which the directory filter needs to judge scheduled directories.
+func loadCommitItems(r model.Repo, includeUnversioned bool) (items []model.CommitItem, hiddenPaths []string, err error) {
 	out, err := svn.Run(r, "status")
 	if err != nil {
-		return nil, fmt.Errorf("svn status failed\n\nWorking copy: %s\n\nOutput:\n%s\n\nError: %w", r.Path, out, err)
+		return nil, nil, fmt.Errorf("svn status failed\n\nWorking copy: %s\n\nOutput:\n%s\n\nError: %w", r.Path, out, err)
 	}
-	var items []model.CommitItem
 	for _, line := range strings.Split(out, "\n") {
-		item, ok := parseSVNLocalChangeStatusLine(r, line, includeUnversioned)
+		item, ok, hidden := parseSVNLocalChangeStatusLine(r, line, includeUnversioned)
+		if hidden {
+			hiddenPaths = append(hiddenPaths, item.Path)
+			continue
+		}
 		if !ok {
 			continue
 		}
@@ -507,12 +542,15 @@ func loadCommitItems(r model.Repo, includeUnversioned bool) ([]model.CommitItem,
 		}
 		return items[i].Path < items[j].Path
 	})
-	return items, nil
+	return items, hiddenPaths, nil
 }
 
-func parseSVNLocalChangeStatusLine(r model.Repo, line string, includeUnversioned bool) (model.CommitItem, bool) {
+// parseSVNLocalChangeStatusLine turns one svn status line into a commit item.
+// The third return value marks a real change that ignore.txt hides: callers
+// need it to tell "nothing changed here" from "only ignored things changed".
+func parseSVNLocalChangeStatusLine(r model.Repo, line string, includeUnversioned bool) (model.CommitItem, bool, bool) {
 	if strings.TrimSpace(line) == "" {
-		return model.CommitItem{}, false
+		return model.CommitItem{}, false, false
 	}
 	textStatus := byte(' ')
 	propStatus := byte(' ')
@@ -532,35 +570,45 @@ func parseSVNLocalChangeStatusLine(r model.Repo, line string, includeUnversioned
 		}
 	}
 	path = strings.TrimPrefix(filepath.ToSlash(path), "./")
-	if path == "" || shouldHideFromCommitSelect(path) {
-		return model.CommitItem{}, false
+	if path == "" {
+		return model.CommitItem{}, false, false
 	}
 	unversioned := textStatus == '?'
 	if unversioned && !includeUnversioned {
-		return model.CommitItem{}, false
+		return model.CommitItem{}, false, false
 	}
 	textChanged := strings.ContainsRune("MADRC!~", rune(textStatus))
 	propsChanged := propStatus == 'M' || propStatus == 'C'
+	// Column 7 carries the tree-conflict marker; columns 1 and 2 the text and
+	// property conflicts.
+	conflicted := textStatus == 'C' || propStatus == 'C' || (len(line) > 6 && line[6] == 'C')
 	if !unversioned && !textChanged && !propsChanged {
-		return model.CommitItem{}, false
+		return model.CommitItem{}, false, false
 	}
-	status := strings.TrimSpace(line[:min(len(line), 8)])
-	if status == "" {
+	if shouldHideFromCommitSelect(path) {
+		return model.CommitItem{Path: path}, false, true
+	}
+	// Keep the leading columns: "M" is a content change, " M" a property-only
+	// one, and a merge shows up as property changes on directories.
+	status := strings.TrimRight(line[:min(len(line), 8)], " ")
+	if strings.TrimSpace(status) == "" {
 		status = string(textStatus)
 	}
 	return model.CommitItem{
-		Status:      status,
-		Path:        path,
-		Unversioned: unversioned,
-		IsDir:       isSVNDir(r, path),
-	}, true
+		Status:       status,
+		Path:         path,
+		Unversioned:  unversioned,
+		PropsChanged: propsChanged,
+		Conflicted:   conflicted,
+		IsDir:        isSVNDir(r, path),
+	}, true, false
 }
 
 // shouldHideFromCommitSelect drops paths that must never reach the commit list:
 // the shelf store plus everything named in ~/.config/svn-tui/ignore.txt.
 func shouldHideFromCommitSelect(path string) bool {
 	clean := strings.TrimPrefix(strings.TrimSpace(filepath.ToSlash(path)), "./")
-	if clean == "." || clean == model.ShelvesDir || strings.HasPrefix(clean, model.ShelvesDir+"/") {
+	if clean == model.ShelvesDir || strings.HasPrefix(clean, model.ShelvesDir+"/") {
 		return true
 	}
 	return svn.Ignores().HidesPath(clean)
@@ -573,17 +621,57 @@ func isScheduledDirChange(item model.CommitItem) bool {
 	return item.IsDir && len(item.Status) > 0 && (item.Status[0] == 'A' || item.Status[0] == 'R')
 }
 
-func filterSelectFilesOnly(r model.Repo, items []model.CommitItem) []model.CommitItem {
+func filterSelectFilesOnly(r model.Repo, items []model.CommitItem, hiddenPaths []string) []model.CommitItem {
 	filtered := make([]model.CommitItem, 0, len(items))
 	for _, item := range items {
-		isDir := item.IsDir || isSVNDir(r, item.Path)
-		item.IsDir = isDir
-		if isDir && !item.Unversioned && !isScheduledDirChange(item) {
-			continue
+		item.IsDir = item.IsDir || isSVNDir(r, item.Path)
+		if item.IsDir && !item.Unversioned {
+			switch {
+			case isScheduledDirChange(item):
+				// An added or replaced directory carries its whole subtree, and
+				// svn status does not list the children of a copy. Ask SVN what
+				// is actually inside: with nothing but ignore.txt paths in there
+				// the directory has nothing to offer.
+				if dirChangesAllIgnored(r, item.Path) {
+					continue
+				}
+			case item.PropsChanged:
+				// Property-only change, such as the svn:mergeinfo a merge
+				// records. Committing it is what makes the merge stick.
+			default:
+				continue
+			}
 		}
 		filtered = append(filtered, item)
 	}
 	return filtered
+}
+
+// dirChangesAllIgnored reports whether every change SVN sees under dir is one
+// ignore.txt hides. A directory SVN reports no changes for is not "all ignored":
+// it is a structural change of its own and stays in the list.
+func dirChangesAllIgnored(r model.Repo, dir string) bool {
+	out, err := svn.Run(r, "diff", "--summarize", dir)
+	if err != nil {
+		return false
+	}
+	ignores := svn.Ignores()
+	seen := false
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		path := strings.TrimPrefix(filepath.ToSlash(fields[len(fields)-1]), "./")
+		if path == dir {
+			continue
+		}
+		seen = true
+		if !ignores.HidesPath(path) {
+			return false
+		}
+	}
+	return seen
 }
 
 // withRequiredParentDirs augments selected with any A/R-status directory from
@@ -638,7 +726,11 @@ func commitCmd(r model.Repo, items []model.CommitItem, message string) tea.Cmd {
 
 		line("")
 		line("Converting line endings to CRLF...")
-		for _, p := range paths {
+		for _, item := range items {
+			if item.IsDir {
+				continue
+			}
+			p := item.Path
 			converted, cerr := ensureCRLFFile(r, p)
 			if cerr != nil {
 				line("  Warning: could not convert " + p + ": " + cerr.Error())
@@ -682,11 +774,26 @@ func commitCmd(r model.Repo, items []model.CommitItem, message string) tea.Cmd {
 			line("Unversioned files added successfully.")
 		}
 
+		// svn add --parents may have pulled in ignore.txt paths; they must never
+		// travel up in a commit.
+		kept := paths[:0]
+		for _, p := range paths {
+			if shouldHideFromCommitSelect(p) {
+				line("  skipping ignored path: " + p)
+				continue
+			}
+			kept = append(kept, p)
+		}
+		paths = kept
+
 		line("")
 		line("Running commit...")
 		line("")
 
-		args := append([]string{"commit"}, paths...)
+		// --depth empty commits every target as itself: a directory contributes
+		// its own node and properties, never the local changes of children that
+		// were not selected. SVN still carries a copy recursively, as it must.
+		args := append([]string{"commit", "--depth", "empty"}, paths...)
 		args = append(args, "-m", message)
 
 		err := svn.StreamLines(r, func(raw string) { output.WriteString(raw + "\n"); emit(raw) }, args...)
@@ -698,21 +805,143 @@ func commitCmd(r model.Repo, items []model.CommitItem, message string) tea.Cmd {
 	})
 }
 
-func revertCmd(r model.Repo, paths []string) tea.Cmd {
+func revertCmd(r model.Repo, items []model.CommitItem) tea.Cmd {
 	return func() tea.Msg {
 		var output strings.Builder
-		output.WriteString("Working copy: " + r.Path + "\n")
-		output.WriteString("Selected files to revert:\n")
-		for _, p := range paths {
-			output.WriteString("  " + p + "\n")
+		line := func(s string) { output.WriteString(s + "\n") }
+
+		line("Working copy: " + r.Path)
+		line("Selected files to revert:")
+		var files, dirs []string
+		for _, item := range items {
+			// Only a scheduled directory needs its children reverted with it.
+			// A property-only change reverts on its own, so the subtree is left
+			// alone — that matters most for the working copy root.
+			if item.IsDir && isScheduledDirChange(item) {
+				dirs = append(dirs, item.Path)
+				line("  " + item.Path + "  (directory — reverts everything below it)")
+				continue
+			}
+			files = append(files, item.Path)
+			line("  " + item.Path)
 		}
-		output.WriteString("\nRunning revert...\n\n")
-		out, err := svn.Run(r, append([]string{"revert"}, paths...)...)
-		output.WriteString(out)
+
+		// A directory revert takes the whole subtree with it, so stash the
+		// ignore.txt paths inside it and put them back afterwards.
+		saved, tmpRoot, err := preserveIgnoredPaths(r, dirs)
+		if err != nil {
+			line("")
+			line("Could not stash ignored files before reverting: " + err.Error())
+			return model.CommandResult{Output: output.String(), Err: err, CurrentLocation: svn.GetCurrentLocation(r)}
+		}
+		if tmpRoot != "" {
+			defer os.RemoveAll(tmpRoot)
+		}
+
+		line("")
+		line("Running revert...")
+		line("")
+
+		run := func(args ...string) error {
+			out, err := svn.Run(r, args...)
+			output.WriteString(out)
+			return err
+		}
+
+		if len(files) > 0 {
+			err = run(append([]string{"revert"}, files...)...)
+		}
+		// SVN refuses to revert a scheduled directory without its children
+		// (E155038), so directories go in one at a time with --depth infinity.
+		for _, dir := range dirs {
+			if err != nil {
+				break
+			}
+			line("svn revert --depth infinity " + dir)
+			err = run("revert", "--depth", "infinity", dir)
+		}
+
+		if len(saved) > 0 {
+			line("")
+			line("Restoring ignored files:")
+			restorePreservedPaths(r, saved, line)
+		}
+
 		if err == nil {
-			output.WriteString("\nRevert finished successfully.")
+			line("")
+			line("Revert finished successfully.")
 		}
 		return model.CommandResult{Output: output.String(), Err: err, CurrentLocation: svn.GetCurrentLocation(r)}
+	}
+}
+
+// preservedPath is one ignore.txt file copied aside before a directory revert.
+type preservedPath struct{ rel, tmp string }
+
+// preserveIgnoredPaths copies every ignore.txt file found under dirs into a
+// temporary directory. Reverting a directory discards local edits in its whole
+// subtree, and files listed in ignore.txt are exactly the ones svn-tui must
+// leave alone. Ignored directories are skipped rather than copied — they hold
+// unversioned output (vendor, node_modules) that revert does not touch.
+func preserveIgnoredPaths(r model.Repo, dirs []string) ([]preservedPath, string, error) {
+	if len(dirs) == 0 {
+		return nil, "", nil
+	}
+	ignores := svn.Ignores()
+	tmpRoot, err := os.MkdirTemp("", "svn-tui-preserve-")
+	if err != nil {
+		return nil, "", err
+	}
+	var saved []preservedPath
+	for _, dir := range dirs {
+		root := filepath.Join(r.Path, filepath.FromSlash(dir))
+		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				if ignores.HidesName(d.Name()) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			rel, err := filepath.Rel(r.Path, path)
+			if err != nil {
+				return nil
+			}
+			rel = filepath.ToSlash(rel)
+			if !ignores.HidesPath(rel) {
+				return nil
+			}
+			tmp := filepath.Join(tmpRoot, filepath.FromSlash(rel))
+			if err := copyPath(path, tmp); err != nil {
+				return nil
+			}
+			saved = append(saved, preservedPath{rel: rel, tmp: tmp})
+			return nil
+		})
+	}
+	if len(saved) == 0 {
+		os.RemoveAll(tmpRoot)
+		return nil, "", nil
+	}
+	return saved, tmpRoot, nil
+}
+
+// restorePreservedPaths copies the stashed ignore.txt files back over whatever
+// the revert left behind.
+func restorePreservedPaths(r model.Repo, saved []preservedPath, line func(string)) {
+	for _, p := range saved {
+		dst := filepath.Join(r.Path, filepath.FromSlash(p.rel))
+		if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+			line("  FAILED: " + p.rel + " — " + err.Error())
+			continue
+		}
+		if err := copyPath(p.tmp, dst); err != nil {
+			line("  FAILED: " + p.rel + " — " + err.Error())
+			continue
+		}
+		line("  kept local version of " + p.rel)
 	}
 }
 
@@ -907,6 +1136,21 @@ func svnPatchFile(r model.Repo, patchPath string) (string, error) {
 		return out + string(fallbackOut), nil
 	}
 	return out + string(fallbackOut), fmt.Errorf("svn patch failed: %w; fallback patch failed: %v", err, fallbackErr)
+}
+
+// deleteShelf throws away one stored shelf. A shelf is just a directory under
+// .svn-tui-shelves holding a patch and copies of unversioned files, so deleting
+// it discards those saved changes and leaves the working copy untouched.
+func deleteShelf(r model.Repo, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.ContainsAny(name, "/\\") || name == "." || name == ".." {
+		return fmt.Errorf("invalid shelf name: %q", name)
+	}
+	if err := os.RemoveAll(filepath.Join(r.Path, model.ShelvesDir, name)); err != nil {
+		return err
+	}
+	_, err := removeShelvesRootIfEmpty(r)
+	return err
 }
 
 func removeShelvesRootIfEmpty(r model.Repo) (bool, error) {
@@ -1311,7 +1555,11 @@ func diffCmd(r model.Repo, item model.CommitItem, width int) tea.Cmd {
 	return func() tea.Msg {
 		out, err := buildSideBySideDiff(r, item, width)
 		if err != nil {
-			fallbackOut, fallbackErr := svn.Run(r, "diff", item.Path)
+			fallbackArgs := []string{"diff"}
+			if item.IsDir {
+				fallbackArgs = append(fallbackArgs, "--depth", "empty")
+			}
+			fallbackOut, fallbackErr := svn.Run(r, append(fallbackArgs, item.Path)...)
 			if fallbackOut != "" {
 				out += "\n\nUnified svn diff fallback:\n\n" + fallbackOut
 			}
@@ -1607,3 +1855,129 @@ func isBinaryContent(data []byte) bool {
 
 // ── XML (needed for cmds.go) ─────────────────────────────────────────────────
 // xml imported at top of file
+
+// ── Properties ────────────────────────────────────────────────────────────────
+
+func searchPropertyTargetsCmd(r model.Repo, query string) tea.Cmd {
+	return func() tea.Msg {
+		items, err := searchPropertyTargets(r, query, 300)
+		return model.PropertyTargetsLoadedMsg{Query: query, Items: items, Err: err}
+	}
+}
+
+// searchPropertyTargets finds versioned directories and files whose path
+// contains the query. Directories come first: properties live on them far more
+// often than on files.
+func searchPropertyTargets(r model.Repo, query string, limit int) ([]string, error) {
+	query = strings.ToLower(strings.TrimSpace(filepath.ToSlash(query)))
+	if limit <= 0 {
+		limit = 300
+	}
+	ignores := svn.Ignores()
+	var dirs, files []string
+	err := filepath.WalkDir(r.Path, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() && ignores.HidesName(d.Name()) {
+			return filepath.SkipDir
+		}
+		rel, err := filepath.Rel(r.Path, path)
+		if err != nil {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "." || ignores.HidesPath(rel) {
+			return nil
+		}
+		if !strings.Contains(strings.ToLower(rel), query) {
+			return nil
+		}
+		if d.IsDir() {
+			dirs = append(dirs, rel)
+		} else {
+			files = append(files, rel)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(dirs)
+	sort.Strings(files)
+	// "." is the merge target and the most common property holder, so it leads.
+	items := append([]string{"."}, append(dirs, files...)...)
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
+}
+
+func loadPropertiesCmd(r model.Repo, target string, notice string) tea.Cmd {
+	return func() tea.Msg {
+		items, err := loadProperties(r, target)
+		return model.PropertiesLoadedMsg{Target: target, Items: items, Err: err, Notice: notice}
+	}
+}
+
+func loadProperties(r model.Repo, target string) ([]model.PropertyItem, error) {
+	out, err := svn.Run(r, "proplist", "-v", "--xml", target)
+	if err != nil {
+		return nil, fmt.Errorf("svn proplist failed\n\nWorking copy: %s\nTarget: %s\n\nOutput:\n%s\n\nError: %w", r.Path, target, out, err)
+	}
+	var parsed model.SVNPropListXML
+	if err := xml.Unmarshal([]byte(out), &parsed); err != nil {
+		return nil, fmt.Errorf("could not parse svn proplist output for %s: %w\n\nOutput:\n%s", target, err, out)
+	}
+	var items []model.PropertyItem
+	for _, t := range parsed.Targets {
+		for _, prop := range t.Properties {
+			items = append(items, model.PropertyItem{Name: prop.Name, Value: prop.Value})
+		}
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
+	return items, nil
+}
+
+// setPropertyCmd writes one property and reloads the list so the result is
+// visible straight away.
+func setPropertyCmd(r model.Repo, target, name, value string) tea.Cmd {
+	return func() tea.Msg {
+		out, err := svn.Run(r, "propset", name, value, target)
+		if err != nil {
+			return model.PropertiesLoadedMsg{
+				Target: target,
+				Err:    fmt.Errorf("svn propset %s failed\n\nTarget: %s\n\nOutput:\n%s\n\nError: %w", name, target, out, err),
+			}
+		}
+		items, err := loadProperties(r, target)
+		return model.PropertiesLoadedMsg{Target: target, Items: items, Err: err, Notice: "Set " + name + " on " + target}
+	}
+}
+
+func deletePropertyCmd(r model.Repo, target, name string) tea.Cmd {
+	return func() tea.Msg {
+		out, err := svn.Run(r, "propdel", name, target)
+		if err != nil {
+			return model.PropertiesLoadedMsg{
+				Target: target,
+				Err:    fmt.Errorf("svn propdel %s failed\n\nTarget: %s\n\nOutput:\n%s\n\nError: %w", name, target, out, err),
+			}
+		}
+		items, err := loadProperties(r, target)
+		return model.PropertiesLoadedMsg{Target: target, Items: items, Err: err, Notice: "Deleted " + name + " from " + target}
+	}
+}
+
+// expandPropertyValue turns a typed "\n" into a real newline: svn:ignore and
+// svn:mergeinfo are line-based, and the input field is single-line.
+func expandPropertyValue(value string) string {
+	return strings.ReplaceAll(value, `\n`, "\n")
+}
+
+// collapsePropertyValue is the inverse, for prefilling the input when editing.
+// SVN appends a trailing newline to line-based values, so it is trimmed first:
+// without that, every edit round trip would grow an extra blank line.
+func collapsePropertyValue(value string) string {
+	return strings.ReplaceAll(strings.TrimRight(value, "\n"), "\n", `\n`)
+}

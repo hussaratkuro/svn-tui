@@ -44,6 +44,16 @@ func (m Model) View() string {
 		return m.viewRevertSelect()
 	case model.ScreenConflictSelect:
 		return m.viewConflictSelect()
+	case model.ScreenPropertyTargetInput:
+		return m.viewPropertyTargetInput()
+	case model.ScreenPropertyTargetSelect:
+		return m.viewPropertyTargetSelect()
+	case model.ScreenPropertyList:
+		return m.viewPropertyList()
+	case model.ScreenPropertyNameInput:
+		return m.viewPropertyNameInput()
+	case model.ScreenPropertyValueInput:
+		return m.viewPropertyValueInput()
 	case model.ScreenHistory, model.ScreenHistorySearch:
 		return m.viewHistory()
 	case model.ScreenDiff:
@@ -148,10 +158,20 @@ func (m Model) viewActionSelect() string {
 	var b strings.Builder
 	b.WriteString(m.compactHeader("Select action"))
 
-	items := max(3, m.listInnerHeight()-2)
-	end := min(len(m.actions), m.actionOffset+items)
+	filtered := m.filteredActionIndexes()
+
+	overhead := 2
+	if m.actionFilterMode {
+		overhead = 3
+	}
+	items := max(3, m.listInnerHeight()-overhead)
+	end := min(len(filtered), m.actionOffset+items)
 
 	var c strings.Builder
+	if m.actionFilterMode {
+		c.WriteString(labelYellowStyle.Render("/") + valueWhiteStyle.Render(m.actionFilter+"_") +
+			mutedStyle.Render(fmt.Sprintf("  %d/%d  Enter: run | Esc: cancel", len(filtered), len(m.actions))) + "\n")
+	}
 	for i := m.actionOffset; i < end; i++ {
 		cursor := " "
 		lineStyle := actionStyle
@@ -159,13 +179,20 @@ func (m Model) viewActionSelect() string {
 			cursor = ">"
 			lineStyle = actionSelectedStyle
 		}
-		c.WriteString(lineStyle.Render(fmt.Sprintf("%s %s", cursor, m.actions[i])) + "\n")
+		c.WriteString(lineStyle.Render(fmt.Sprintf("%s %s", cursor, m.actions[filtered[i]])) + "\n")
+	}
+	if len(filtered) == 0 {
+		c.WriteString(mutedStyle.Render("  no action matches "+m.actionFilter) + "\n")
 	}
 	c.WriteString("\n")
-	c.WriteString(mutedStyle.Render(scrollHint(m.actionOffset, end, len(m.actions))))
+	c.WriteString(mutedStyle.Render(scrollHint(m.actionOffset, end, len(filtered))))
 
 	b.WriteString(m.listBox(c.String()))
-	b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("Enter", "run"), hint("i", "info"), hint("Esc", "repos"), hint("q", "quit")))
+	if m.actionFilterMode {
+		b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("Enter", "run"), hint("Esc", "cancel search")))
+	} else {
+		b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("/", "search"), hint("Enter", "run"), hint("i", "info"), hint("Esc", "repos"), hint("q", "quit")))
+	}
 	return b.String()
 }
 
@@ -303,13 +330,23 @@ func (m Model) viewShelfSelect() string {
 			cursor = ">"
 			lineStyle = selectedStyle
 		}
-		c.WriteString(lineStyle.Render(fmt.Sprintf("%s %s", cursor, m.shelves[i])) + "\n")
+		name := m.shelves[i]
+		if i == m.shelfDeleteIdx {
+			lineStyle = errorStyle
+			name += "   DELETE!"
+		}
+		c.WriteString(lineStyle.Render(fmt.Sprintf("%s %s", cursor, name)) + "\n")
 	}
 	c.WriteString("\n")
 	c.WriteString(mutedStyle.Render(scrollHint(m.shelfOffset, end, len(m.shelves))))
 
 	b.WriteString(m.listBox(c.String()))
-	b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("Enter", "unshelve"), hint("i", "info"), hint("Esc", "back")))
+
+	if m.shelfDeleteIdx >= 0 {
+		b.WriteString("\n" + warningStyle.Render("Del again: discard this shelf and its saved changes — or move cursor to cancel"))
+		return b.String()
+	}
+	b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("Enter", "unshelve"), hint("Del", "delete shelf"), hint("i", "info"), hint("Esc", "back")))
 	return b.String()
 }
 
@@ -408,7 +445,11 @@ func (m Model) viewShelveSelect() string {
 	var b strings.Builder
 	b.WriteString(m.compactHeader("Shelve local changes"))
 
-	items := max(3, m.listInnerHeight()-5)
+	items := max(3, m.listInnerHeight()-5-len(m.commitConflicts))
+	if len(m.commitConflicts) > 0 {
+		items--
+	}
+	items = max(3, items)
 	end := min(len(m.commitItems), m.commitOffset+items)
 
 	var c strings.Builder
@@ -430,7 +471,7 @@ func (m Model) viewShelveSelect() string {
 		if item.Unversioned {
 			status = "? copy"
 		}
-		line := fmt.Sprintf("%s %s %-8s %s", cursor, checkText, status, item.Path)
+		line := fmt.Sprintf("%s %s %-8s %s", cursor, checkText, status, commitItemLabel(item))
 		if isCursor {
 			c.WriteString(selectedStyle.Render(line) + "\n")
 		} else if item.Selected {
@@ -454,11 +495,21 @@ func (m Model) viewCommitSelect() string {
 	var b strings.Builder
 	b.WriteString(m.compactHeader("Commit"))
 
-	items := max(3, m.listInnerHeight()-5)
+	items := max(3, m.listInnerHeight()-5-len(m.commitConflicts))
+	if len(m.commitConflicts) > 0 {
+		items--
+	}
+	items = max(3, items)
 	end := min(len(m.commitItems), m.commitOffset+items)
 
 	var c strings.Builder
 	c.WriteString(mutedStyle.Render(fmt.Sprintf("Selected files: %d | Unversioned (will be svn add-ed): %d", selectedCount, unversionedCount)) + "\n")
+	if n := len(m.commitConflicts); n > 0 {
+		c.WriteString(warningStyle.Render(fmt.Sprintf("%d path(s) left out: still in conflict, SVN refuses to commit them — see Resolve conflicts", n)) + "\n")
+		for _, p := range m.commitConflicts {
+			c.WriteString(warningStyle.Render("  "+p) + "\n")
+		}
+	}
 	c.WriteString(textStyle.Render("Working copy changes:") + "\n")
 	c.WriteString(mutedStyle.Render("─────────────────────") + "\n")
 	for i := m.commitOffset; i < end; i++ {
@@ -474,6 +525,7 @@ func (m Model) viewCommitSelect() string {
 		}
 		armed := m.deleteConfirmIdx == i
 		status := item.Status
+		path := commitItemLabel(item)
 		if item.Unversioned {
 			if armed {
 				status = "? DEL!"
@@ -483,7 +535,7 @@ func (m Model) viewCommitSelect() string {
 		} else if armed && len(item.Status) > 0 && item.Status[0] == 'A' {
 			status = "A DEL!"
 		}
-		line := fmt.Sprintf("%s %s %-8s %s", cursor, checkText, status, item.Path)
+		line := fmt.Sprintf("%s %s %-8s %s", cursor, checkText, status, path)
 		if armed {
 			c.WriteString(errorStyle.Render(line) + "\n")
 		} else if isCursor {
@@ -493,7 +545,7 @@ func (m Model) viewCommitSelect() string {
 			if item.Selected {
 				check = checkedStyle.Render(checkText)
 			}
-			line2 := fmt.Sprintf("%s %s %-8s %s", cursor, check, status, item.Path)
+			line2 := fmt.Sprintf("%s %s %-8s %s", cursor, check, status, path)
 			if item.Selected {
 				c.WriteString(checkedStyle.Render(line2) + "\n")
 			} else {
@@ -961,4 +1013,165 @@ func lastMeaningfulLine(s string) string {
 		}
 	}
 	return ""
+}
+
+// commitItemLabel renders a directory with a trailing slash: a property-only or
+// copied directory is a change in its own right and should not read as a file.
+func commitItemLabel(item model.CommitItem) string {
+	label := item.Path
+	if label == "." {
+		label = "./  (working copy root)"
+	} else if item.IsDir && !strings.HasSuffix(label, "/") {
+		label += "/"
+	}
+	// A property-only directory commits its own properties and nothing below
+	// it — say so, or it reads as if the whole subtree went along.
+	if item.IsDir && item.PropsChanged && !item.Unversioned && !isScheduledDirChange(item) {
+		label += "  (properties only, e.g. merge info)"
+	}
+	return label
+}
+
+// ── Properties ────────────────────────────────────────────────────────────────
+
+func (m Model) viewPropertyTargetInput() string {
+	var b strings.Builder
+	b.WriteString(m.compactHeader("Properties"))
+	var c strings.Builder
+	c.WriteString(textStyle.Render("Which path?") + "\n")
+	c.WriteString(m.input.View() + "\n\n")
+	c.WriteString(mutedStyle.Render("Empty search opens the working copy root (.), where a merge records svn:mergeinfo.") + "\n")
+	c.WriteString(mutedStyle.Render("Otherwise type part of a path — directories are listed first."))
+	b.WriteString(m.listBox(c.String()))
+	b.WriteString(statusBar(hint("Enter", "open"), hint("i", "info"), hint("Esc", "back")))
+	return b.String()
+}
+
+func (m Model) viewPropertyTargetSelect() string {
+	var b strings.Builder
+	b.WriteString(m.compactHeader("Properties — pick a path"))
+
+	items := max(3, m.listInnerHeight()-3)
+	end := min(len(m.propertyTargets), m.propertyTargetOffset+items)
+
+	var c strings.Builder
+	c.WriteString(textStyle.Render("Matching paths:") + "\n")
+	c.WriteString(mutedStyle.Render("───────────────") + "\n")
+	for i := m.propertyTargetOffset; i < end; i++ {
+		cursor := " "
+		lineStyle := normalStyle
+		if i == m.propertyTargetCursor {
+			cursor = ">"
+			lineStyle = selectedStyle
+		}
+		label := m.propertyTargets[i]
+		if label == "." {
+			label = "./  (working copy root)"
+		}
+		c.WriteString(lineStyle.Render(fmt.Sprintf("%s %s", cursor, label)) + "\n")
+	}
+	c.WriteString("\n")
+	c.WriteString(mutedStyle.Render(scrollHint(m.propertyTargetOffset, end, len(m.propertyTargets))))
+
+	b.WriteString(m.listBox(c.String()))
+	b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("Enter", "properties"), hint("i", "info"), hint("Esc", "search again")))
+	return b.String()
+}
+
+func (m Model) viewPropertyList() string {
+	target := m.propertyTarget
+	if target == "." {
+		target = "./  (working copy root)"
+	}
+
+	var b strings.Builder
+	b.WriteString(m.compactHeader("Properties of " + target))
+
+	// Each property takes a name line plus a preview of its value.
+	const valueLines = 3
+	items := max(1, (m.listInnerHeight()-4)/(valueLines+1))
+	end := min(len(m.propertyItems), m.propertyOffset+items)
+
+	var c strings.Builder
+	if m.propertyNotice != "" {
+		c.WriteString(successStyle.Render(m.propertyNotice) + "\n")
+	}
+	c.WriteString(textStyle.Render(fmt.Sprintf("%d propert(y/ies):", len(m.propertyItems))) + "\n")
+	c.WriteString(mutedStyle.Render("────────────────") + "\n")
+
+	for i := m.propertyOffset; i < end; i++ {
+		item := m.propertyItems[i]
+		cursor := " "
+		nameStyle := normalStyle
+		if i == m.propertyCursor {
+			cursor = ">"
+			nameStyle = selectedStyle
+		}
+		name := item.Name
+		if i == m.propertyDeleteIdx {
+			nameStyle = errorStyle
+			name += "   DELETE!"
+		}
+		c.WriteString(nameStyle.Render(fmt.Sprintf("%s %s", cursor, name)) + "\n")
+		for _, l := range propertyValuePreview(item.Value, valueLines) {
+			c.WriteString(mutedStyle.Render("      "+l) + "\n")
+		}
+	}
+	if len(m.propertyItems) == 0 {
+		c.WriteString(mutedStyle.Render("  no properties on this path — press a to add one") + "\n")
+	}
+	c.WriteString(mutedStyle.Render(scrollHint(m.propertyOffset, end, len(m.propertyItems))))
+
+	b.WriteString(m.listBox(c.String()))
+
+	if m.propertyDeleteIdx >= 0 {
+		b.WriteString("\n" + warningStyle.Render("Del again: remove this property — or move cursor to cancel"))
+		return b.String()
+	}
+	b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("a", "add"), hint("Enter/e", "edit value"), hint("Del", "delete"), hint("i", "info"), hint("Esc", "back")))
+	return b.String()
+}
+
+// propertyValuePreview renders at most limit lines of a property value, so a
+// 38-line svn:mergeinfo does not push everything else off the screen.
+func propertyValuePreview(value string, limit int) []string {
+	trimmed := strings.TrimRight(value, "\n")
+	if strings.TrimSpace(trimmed) == "" {
+		return []string{"(empty)"}
+	}
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) <= limit {
+		return lines
+	}
+	shown := append([]string(nil), lines[:limit]...)
+	return append(shown, fmt.Sprintf("… %d more line(s)", len(lines)-limit))
+}
+
+func (m Model) viewPropertyNameInput() string {
+	var b strings.Builder
+	b.WriteString(m.compactHeader("Add property to " + m.propertyTarget))
+	var c strings.Builder
+	c.WriteString(textStyle.Render("Property name:") + "\n")
+	c.WriteString(m.input.View() + "\n\n")
+	c.WriteString(mutedStyle.Render("Common ones: svn:ignore, svn:mergeinfo, svn:eol-style, svn:executable, svn:mime-type."))
+	b.WriteString(m.listBox(c.String()))
+	b.WriteString(statusBar(hint("Enter", "next: value"), hint("i", "info"), hint("Esc", "back")))
+	return b.String()
+}
+
+func (m Model) viewPropertyValueInput() string {
+	title := "Set " + m.propertyName
+	if m.propertyEditing {
+		title = "Edit " + m.propertyName
+	}
+	var b strings.Builder
+	b.WriteString(m.compactHeader(title + " on " + m.propertyTarget))
+	var c strings.Builder
+	c.WriteString(textStyle.Render("Value:") + "\n")
+	c.WriteString(m.input.View() + "\n\n")
+	c.WriteString(mutedStyle.Render(`Type \n for a line break — svn:ignore and svn:mergeinfo are line-based.`) + "\n")
+	c.WriteString(mutedStyle.Render("This runs: svn propset " + m.propertyName + " VALUE " + m.propertyTarget))
+	b.WriteString(m.listBox(c.String()))
+	b.WriteString(statusBar(hint("Enter", "set property"), hint("i", "info"), hint("Esc", "back")))
+	return b.String()
 }

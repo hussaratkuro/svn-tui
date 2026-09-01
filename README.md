@@ -67,6 +67,15 @@ The Revert action lists local changes and lets you choose which files to revert.
 
 > Warning: `svn revert` discards local changes for selected versioned files.
 
+A directory scheduled as added or replaced (`A`, `R`) is listed only when it has
+a visible change under it, since SVN needs it in the same commit as its children.
+If everything under it is hidden by `ignore.txt`, the directory is hidden too.
+
+Directories are reverted with `--depth infinity`, because SVN refuses to revert a
+scheduled directory without its children. That means reverting a directory
+discards every local change below it — except the paths listed in `ignore.txt`,
+which are copied aside before the revert and put back afterwards.
+
 ### Create branch
 
 Creates a branch from the current working copy URL.
@@ -88,6 +97,17 @@ For large branch lists, you do not need to scroll through the entire branch swam
 - use arrows or `j/k` to move normally
 - type the branch number and press `Enter`
 - use `Backspace` to edit the typed number
+
+### Unshelve or delete shelves
+
+The Unshelve action lists the shelves stored in `.svn-tui-shelves`.
+
+- `Enter` restores a shelf and removes it from the list
+- `Del` deletes a shelf without restoring it — press `Del` once to arm, again to
+  confirm, or move the cursor to cancel
+
+Deleting a shelf discards its saved patch and file copies for good. The working
+copy is not touched. When the last shelf is gone, `.svn-tui-shelves` is removed.
 
 ### Switch to trunk
 
@@ -134,6 +154,25 @@ svn cleanup
 
 Releases stale working-copy locks and rolls back unfinished operations, for when
 SVN insists the working copy is locked.
+
+### Properties
+
+Views and edits SVN properties on any path in the working copy.
+
+- the search box picks the path; an empty search opens the working copy root
+  (`.`), where a merge records `svn:mergeinfo`
+- directories are listed before files, since properties usually live on them
+- the list shows each property with a 3-line preview of its value, so a 38-line
+  `svn:mergeinfo` does not fill the screen
+- `a` adds a property (name, then value), `Enter`/`e` edits the value of the
+  selected one, `Del` removes it (press twice to confirm)
+
+Values are entered on one line; type `\n` for a line break, which `svn:ignore`
+and `svn:mergeinfo` need. Editing prefills the current value in the same form.
+
+Behind the scenes this is `svn proplist -v --xml`, `svn propset`, and
+`svn propdel`. Properties are local changes until committed — the path shows up
+in the commit list as a property-only change.
 
 ### Commit history
 
@@ -284,8 +323,10 @@ name=.claude
 name=CLAUDE.md
 name=graphify-out
 
-# hides one exact working-copy-relative path
+# hides one working-copy-relative path; name a directory to hide it and
+# everything under it
 path=Workspace/Web/project/modul/_html.php
+path=Workspace/Web/project/generated
 
 # bare lines work too: a line with "/" is a path, anything else is a name
 build/generated/version.php
@@ -296,7 +337,7 @@ Supported keys:
 | Key | Description |
 | --- | --- |
 | `name`, `names`, `dir`, `file` | Path component hidden anywhere in the working copy |
-| `path`, `paths` | Exact working-copy-relative path |
+| `path`, `paths` | Working-copy-relative path; a directory hides its whole subtree |
 
 Nothing is hidden without this file, so `ignore.txt` in the repository root is a
 ready-made starting point — copy it to `~/.config/svn-tui/ignore.txt`. The same
@@ -336,6 +377,7 @@ SVN_TUI_REPOS="/home/user/dev/:/home/user/dev/another-project" svn-tui
 | `Enter` | Confirm / run selected action |
 | `Esc` | Back |
 | `q` | Quit |
+| `/` | Search the action list (Enter runs, Esc cancels) |
 
 ### Pull screen
 

@@ -22,6 +22,11 @@ const (
 	ScreenConflictSelect
 	ScreenFileHistorySearch
 	ScreenFileHistorySelect
+	ScreenPropertyTargetInput
+	ScreenPropertyTargetSelect
+	ScreenPropertyList
+	ScreenPropertyNameInput
+	ScreenPropertyValueInput
 	ScreenHistory
 	ScreenHistorySearch
 	ScreenDiff
@@ -47,6 +52,7 @@ const (
 	ActionCheckoutRevision
 	ActionResolveConflicts
 	ActionCleanup
+	ActionProperties
 	ActionCommitHistory
 	ActionFileHistory
 	ActionRevisionTree
@@ -81,17 +87,41 @@ type Branch struct {
 // ── Commit items ──────────────────────────────────────────────────────────────
 
 type CommitItem struct {
-	Status      string
-	Path        string
-	Selected    bool
-	Unversioned bool
-	IsDir       bool
+	Status       string
+	Path         string
+	Selected     bool
+	Unversioned  bool
+	PropsChanged bool
+	Conflicted   bool
+	IsDir        bool
 }
 
 type ConflictItem struct {
 	Status string
 	Path   string
 	IsTree bool
+}
+
+// ── Properties ────────────────────────────────────────────────────────────────
+
+type PropertyItem struct {
+	Name  string
+	Value string
+}
+
+// SVNPropListXML mirrors "svn proplist -v --xml".
+type SVNPropListXML struct {
+	Targets []SVNPropTargetXML `xml:"target"`
+}
+
+type SVNPropTargetXML struct {
+	Path       string           `xml:"path,attr"`
+	Properties []SVNPropertyXML `xml:"property"`
+}
+
+type SVNPropertyXML struct {
+	Name  string `xml:"name,attr"`
+	Value string `xml:",chardata"`
 }
 
 // ── Command results ───────────────────────────────────────────────────────────
@@ -135,7 +165,10 @@ type PullItemsLoadedMsg struct {
 
 type CommitItemsLoadedMsg struct {
 	Items []CommitItem
-	Err   error
+	// Conflicted lists paths left out because SVN refuses to commit a path that
+	// is still in conflict (E155015).
+	Conflicted []string
+	Err        error
 }
 
 type ConflictItemsLoadedMsg struct {
@@ -158,6 +191,19 @@ type FileHistoryMatchesLoadedMsg struct {
 type RevertItemsLoadedMsg struct {
 	Items []CommitItem
 	Err   error
+}
+
+type PropertyTargetsLoadedMsg struct {
+	Query string
+	Items []string
+	Err   error
+}
+
+type PropertiesLoadedMsg struct {
+	Target string
+	Items  []PropertyItem
+	Err    error
+	Notice string
 }
 
 type DiffLoadedMsg struct {
