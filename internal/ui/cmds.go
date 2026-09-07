@@ -178,6 +178,85 @@ func switchTrunkCmd(r model.Repo) tea.Cmd {
 	})
 }
 
+// branchDeleteConfirmWord has to be typed out before a branch is deleted, so a
+// stray Enter on the branch list can never remove one.
+const branchDeleteConfirmWord = "delete"
+
+// loadBranchDeleteInfoCmd collects what the confirmation screen shows about the
+// branch: its URL and its last commit.
+func loadBranchDeleteInfoCmd(r model.Repo, branchName string) tea.Cmd {
+	return func() tea.Msg {
+		branchURL := r.Root + "/branches/" + branchName
+		info := model.BranchDeleteInfo{
+			Name:       branchName,
+			URL:        branchURL,
+			IsCheckout: isCheckedOutBranch(r, branchName),
+		}
+
+		out, err := svn.Run(r, "log", "--xml", "-l", "1", branchURL)
+		if err != nil {
+			return model.BranchDeleteInfoLoadedMsg{Info: info, Output: out, Err: fmt.Errorf("svn log failed\n\nBranch URL: %s\n\nOutput:\n%s\n\nError: %w", branchURL, out, err)}
+		}
+		var parsed model.SVNLogXML
+		if err := xml.Unmarshal([]byte(out), &parsed); err != nil {
+			return model.BranchDeleteInfoLoadedMsg{Info: info, Output: out, Err: fmt.Errorf("could not parse svn log output\n\nOutput:\n%s\n\nError: %w", out, err)}
+		}
+		if len(parsed.Entries) > 0 {
+			last := parsed.Entries[0]
+			info.LastRev = last.Revision
+			info.Author = last.Author
+			info.Date = formatSVNLogDate(last.Date)
+			info.Msg = compactOneLine(last.Msg)
+		}
+		return model.BranchDeleteInfoLoadedMsg{Info: info}
+	}
+}
+
+// isCheckedOutBranch reports whether the working copy currently sits on the
+// branch, in which case deleting it would leave the checkout pointing at a
+// missing URL.
+func isCheckedOutBranch(r model.Repo, branchName string) bool {
+	loc := strings.Trim(strings.TrimSpace(svn.GetCurrentLocation(r)), "/")
+	if !strings.HasPrefix(loc, "branches/") {
+		return false
+	}
+	name := strings.TrimPrefix(loc, "branches/")
+	if slash := strings.Index(name, "/"); slash >= 0 {
+		name = name[:slash]
+	}
+	return name == branchName
+}
+
+func deleteBranchCmd(r model.Repo, branchName string) tea.Cmd {
+	return startStreamingCommand(func(emit func(string)) model.CommandResult {
+		branchURL := r.Root + "/branches/" + branchName
+		onBranch := isCheckedOutBranch(r, branchName)
+
+		var output strings.Builder
+		line := func(s string) { output.WriteString(s + "\n"); emit(s) }
+
+		line("Working copy: " + r.Path)
+		line("Current location: " + svn.GetCurrentLocation(r))
+		line("Deleting branch: " + branchName)
+		line("Target URL: " + branchURL)
+		line("")
+
+		err := svn.StreamLines(r, func(raw string) { output.WriteString(raw + "\n"); emit(raw) },
+			"delete", branchURL, "-m", "Deleting branch "+branchName)
+		if err == nil {
+			line("")
+			line("Its history stays in the repository and can be brought back with svn copy from an earlier revision.")
+			line("")
+			line("Branch " + branchName + " deleted from the repository.")
+			if onBranch {
+				line("")
+				line("Warning: the working copy still points at the deleted branch. Switch to trunk before working on.")
+			}
+		}
+		return model.CommandResult{Output: output.String(), Err: err, CurrentLocation: svn.GetCurrentLocation(r), URL: svn.GetCurrentURL(r)}
+	})
+}
+
 func mergeBranchCmd(r model.Repo, branchName string) tea.Cmd {
 	return startStreamingCommand(func(emit func(string)) model.CommandResult {
 		branchURL := r.Root + "/branches/" + branchName
@@ -238,27 +317,231 @@ func mergeBranchCmd(r model.Repo, branchName string) tea.Cmd {
 }
 
 func branchStartRevision(r model.Repo, branchURL string) (int, string, error) {
-	out, err := svn.Run(r, "log", "--xml", "--stop-on-copy", "-v", branchURL)
+	origin, out, err := loadBranchOrigin(r, branchURL)
 	if err != nil {
 		return 0, out, err
 	}
+	return origin.StartRev, "", nil
+}
+
+// branchOrigin describes where a branch came from: the revision that created
+// it, plus the copy source recorded by "svn copy" when SVN still knows it.
+type branchOrigin struct {
+	StartRev int
+	FromPath string
+	FromRev  int
+}
+
+func loadBranchOrigin(r model.Repo, branchURL string) (branchOrigin, string, error) {
+	out, err := svn.Run(r, "log", "--xml", "--stop-on-copy", "-v", branchURL)
+	if err != nil {
+		return branchOrigin{}, out, err
+	}
 	var parsed model.SVNLogXML
 	if err := xml.Unmarshal([]byte(out), &parsed); err != nil {
-		return 0, "", err
+		return branchOrigin{}, "", err
 	}
 	if len(parsed.Entries) == 0 {
-		return 0, "", fmt.Errorf("no svn log entries found for branch")
+		return branchOrigin{}, "", fmt.Errorf("no svn log entries found for branch")
 	}
-	oldest := parsed.Entries[0].Revision
+
+	oldest := parsed.Entries[0]
 	for _, entry := range parsed.Entries {
-		if entry.Revision > 0 && (oldest == 0 || entry.Revision < oldest) {
-			oldest = entry.Revision
+		if entry.Revision > 0 && (oldest.Revision == 0 || entry.Revision < oldest.Revision) {
+			oldest = entry
 		}
 	}
-	if oldest <= 0 {
-		return 0, "", fmt.Errorf("invalid branch start revision")
+	if oldest.Revision <= 0 {
+		return branchOrigin{}, "", fmt.Errorf("invalid branch start revision")
 	}
-	return oldest, "", nil
+
+	origin := branchOrigin{StartRev: oldest.Revision}
+	branchPath := strings.TrimPrefix(branchURL, r.Root)
+	for _, path := range oldest.Paths {
+		if path.CopyFromRev <= 0 || strings.TrimSpace(path.CopyFromPath) == "" {
+			continue
+		}
+		// Prefer the entry that created the branch itself; a single revision
+		// may copy several paths.
+		if origin.FromPath == "" || normalizeSVNTreePath(path.Path) == normalizeSVNTreePath(branchPath) {
+			origin.FromPath = path.CopyFromPath
+			origin.FromRev = path.CopyFromRev
+		}
+	}
+	return origin, out, nil
+}
+
+// ── Branch diff ───────────────────────────────────────────────────────────────
+
+// loadBranchDiffCmd lists every path that differs between the two sides of a
+// branch comparison.
+func loadBranchDiffCmd(r model.Repo, branchName string, mode model.BranchDiffMode) tea.Cmd {
+	return func() tea.Msg {
+		ctx, err := buildBranchDiffContext(r, branchName, mode)
+		if err != nil {
+			return model.BranchDiffLoadedMsg{Context: ctx, Err: err}
+		}
+		items, out, err := loadBranchDiffItems(r, ctx)
+		return model.BranchDiffLoadedMsg{Context: ctx, Items: items, Output: out, Err: err}
+	}
+}
+
+func buildBranchDiffContext(r model.Repo, branchName string, mode model.BranchDiffMode) (model.BranchDiffContext, error) {
+	branchURL := r.Root + "/branches/" + branchName
+	trunkURL := r.Root + "/trunk"
+
+	ctx := model.BranchDiffContext{
+		Mode:   mode,
+		Branch: branchName,
+		New: model.BranchDiffSide{
+			URL:   branchURL,
+			Rev:   "HEAD",
+			Label: "BRANCH " + branchName + "@HEAD",
+		},
+	}
+
+	if mode == model.BranchDiffAgainstTrunkHead {
+		ctx.Old = model.BranchDiffSide{URL: trunkURL, Rev: "HEAD", Label: "TRUNK@HEAD"}
+		ctx.Summary = "Today's trunk (HEAD) compared with the branch head."
+		return ctx, nil
+	}
+
+	origin, out, err := loadBranchOrigin(r, branchURL)
+	if err != nil {
+		return ctx, fmt.Errorf("could not detect the branch start revision\n\nBranch URL: %s\n\nOutput:\n%s\n\nError: %w", branchURL, out, err)
+	}
+
+	// The branch at its creation revision *is* the source state at that moment,
+	// which stays right even if the branch was not copied from trunk.
+	ctx.Old = model.BranchDiffSide{
+		URL:   branchURL,
+		Rev:   strconv.Itoa(origin.StartRev),
+		Label: fmt.Sprintf("BRANCH POINT r%d", origin.StartRev),
+	}
+	ctx.Summary = fmt.Sprintf("Branch created in r%d.", origin.StartRev)
+	if origin.FromPath != "" {
+		ctx.Old.Label = fmt.Sprintf("%s@r%d (BRANCH POINT)", strings.TrimPrefix(origin.FromPath, "/"), origin.FromRev)
+		ctx.Summary = fmt.Sprintf("Branch created in r%d from ^%s@%d.", origin.StartRev, origin.FromPath, origin.FromRev)
+	}
+	return ctx, nil
+}
+
+func loadBranchDiffItems(r model.Repo, ctx model.BranchDiffContext) ([]model.BranchDiffItem, string, error) {
+	out, err := svn.Run(r, "diff", "--summarize", "--xml", ctx.Old.Target(), ctx.New.Target())
+	if err != nil {
+		return nil, out, fmt.Errorf("svn diff --summarize failed\n\nOld: %s\nNew: %s\n\nOutput:\n%s\n\nError: %w", ctx.Old.Target(), ctx.New.Target(), out, err)
+	}
+
+	var parsed model.SVNDiffSummarizeXML
+	if err := xml.Unmarshal([]byte(out), &parsed); err != nil {
+		return nil, out, fmt.Errorf("could not parse svn diff --summarize output\n\nOutput:\n%s\n\nError: %w", out, err)
+	}
+
+	items := make([]model.BranchDiffItem, 0, len(parsed.Paths))
+	for _, path := range parsed.Paths {
+		rel := branchDiffRelativePath(ctx, path.Path)
+		status := branchDiffStatusLetter(path.Item, path.Props)
+		if status == "" {
+			continue
+		}
+		items = append(items, model.BranchDiffItem{
+			Status: status,
+			Path:   rel,
+			IsDir:  strings.EqualFold(strings.TrimSpace(path.Kind), "dir"),
+		})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Path < items[j].Path })
+	return items, out, nil
+}
+
+// branchDiffRelativePath turns the absolute URL printed by svn into a path
+// relative to the compared roots.
+func branchDiffRelativePath(ctx model.BranchDiffContext, raw string) string {
+	rel := strings.TrimSpace(raw)
+	for _, prefix := range []string{ctx.New.URL, ctx.Old.URL} {
+		if prefix != "" && strings.HasPrefix(rel, prefix) {
+			rel = rel[len(prefix):]
+			break
+		}
+	}
+	rel = strings.Trim(rel, "/")
+	if rel == "" {
+		rel = "."
+	}
+	return rel
+}
+
+func branchDiffStatusLetter(item, props string) string {
+	letter := ""
+	switch strings.ToLower(strings.TrimSpace(item)) {
+	case "modified":
+		letter = "M"
+	case "added":
+		letter = "A"
+	case "deleted":
+		letter = "D"
+	case "replaced":
+		letter = "R"
+	}
+	if p := strings.ToLower(strings.TrimSpace(props)); p == "modified" || p == "added" || p == "deleted" {
+		letter += "P"
+	}
+	return letter
+}
+
+func branchDiffStatusText(item model.BranchDiffItem) string {
+	kind := "file"
+	if item.IsDir {
+		kind = "directory"
+	}
+	switch {
+	case strings.HasPrefix(item.Status, "A"):
+		return item.Status + " — " + kind + " added on the branch side"
+	case strings.HasPrefix(item.Status, "D"):
+		return item.Status + " — " + kind + " missing from the branch side"
+	case strings.HasPrefix(item.Status, "R"):
+		return item.Status + " — " + kind + " replaced"
+	case item.Status == "P":
+		return "P — properties only"
+	default:
+		return item.Status + " — " + kind + " modified"
+	}
+}
+
+// branchFileDiffCmd opens one path of a branch comparison side by side.
+func branchFileDiffCmd(r model.Repo, ctx model.BranchDiffContext, item model.BranchDiffItem, width int) tea.Cmd {
+	return func() tea.Msg {
+		out, err := buildBranchFileDiff(r, ctx, item, width)
+		if err != nil {
+			return model.DiffLoadedMsg{Output: out, Err: err, Path: item.Path}
+		}
+		return model.DiffLoadedMsg{Output: out, Path: item.Path}
+	}
+}
+
+// branchDiffMaxBytes caps the unified diff of a whole branch: past this the
+// viewport is unusable anyway, and colorizing megabytes stalls the UI.
+const branchDiffMaxBytes = 2 << 20
+
+// branchFullDiffCmd shows the complete unified diff of a branch comparison.
+func branchFullDiffCmd(r model.Repo, ctx model.BranchDiffContext) tea.Cmd {
+	return func() tea.Msg {
+		label := ctx.Title() + ": " + ctx.Old.Label + "  ->  " + ctx.New.Label
+		out, err := svn.Run(r, "diff", ctx.Old.Target(), ctx.New.Target())
+		if err != nil {
+			return model.DiffLoadedMsg{Output: out, Err: fmt.Errorf("svn diff failed\n\nOld: %s\nNew: %s\n\nOutput:\n%s\n\nError: %w", ctx.Old.Target(), ctx.New.Target(), out, err), Path: label}
+		}
+		truncated := ""
+		if len(out) > branchDiffMaxBytes {
+			out = out[:branchDiffMaxBytes]
+			truncated = "\n\n... diff truncated at 2 MB — open single files from the list instead."
+		}
+		if strings.TrimSpace(out) == "" {
+			return model.DiffLoadedMsg{Output: "No differences found.\n\n" + label, Path: label}
+		}
+		body := label + "\n" + ctx.Summary + "\n\n" + colorizeUnifiedDiff(out) + truncated
+		return model.DiffLoadedMsg{Output: body, Path: label}
+	}
 }
 
 // ── Pull / status ─────────────────────────────────────────────────────────────

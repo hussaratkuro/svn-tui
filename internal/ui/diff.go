@@ -13,21 +13,6 @@ import (
 )
 
 func buildSideBySideDiff(r model.Repo, item model.CommitItem, width int) (string, error) {
-	if width <= 0 {
-		width = 160
-	}
-
-	usableWidth := max(72, width)
-	separatorWidth := lipgloss.Width(" │ Δ │ ")
-	numWidth := 4
-	numColOverhead := 2 * (numWidth + lipgloss.Width(" │ "))
-	cellSpace := usableWidth - separatorWidth - numColOverhead
-	if cellSpace < 48 {
-		cellSpace = 48
-	}
-	leftWidth := max(24, cellSpace/2)
-	rightWidth := max(24, cellSpace-leftWidth)
-
 	if isLikelyDir(r, item.Path) {
 		// --depth empty shows exactly what committing this entry would send:
 		// the directory's own node and properties, not the local changes of
@@ -97,25 +82,6 @@ func buildSideBySideDiff(r model.Repo, item model.CommitItem, width int) (string
 		}
 	}
 
-	oldLines, oldCRLF := splitLinesWithCRLF(oldText)
-	newLines, newCRLF := splitLinesWithCRLF(newText)
-
-	maxLines := max(len(oldLines), len(newLines))
-	if maxLines < 1 {
-		maxLines = 1
-	}
-	numWidth = len(fmt.Sprintf("%d", maxLines))
-	if numWidth < 1 {
-		numWidth = 1
-	}
-	numColOverhead = 2 * (numWidth + lipgloss.Width(" │ "))
-	cellSpace = usableWidth - separatorWidth - numColOverhead
-	if cellSpace < 48 {
-		cellSpace = 48
-	}
-	leftWidth = max(24, cellSpace/2)
-	rightWidth = max(24, cellSpace-leftWidth)
-
 	var b strings.Builder
 	b.WriteString("Path:   " + item.Path + "\n")
 	b.WriteString("Status: " + item.Status + "\n")
@@ -127,12 +93,45 @@ func buildSideBySideDiff(r model.Repo, item model.CommitItem, width int) (string
 		b.WriteString(mutedStyle.Render("Note: added file — left side is empty.") + "\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(renderDiffHeader(leftWidth, rightWidth, numWidth))
+	b.WriteString(renderSideBySideBody(oldText, newText, "OLD / BASE", "NEW / WORKING COPY", width))
+	return b.String(), nil
+}
+
+// renderSideBySideBody renders the two-column table for a pair of file
+// contents: column header, then one row per line pair.
+func renderSideBySideBody(oldText, newText, oldLabel, newLabel string, width int) string {
+	if width <= 0 {
+		width = 160
+	}
+	usableWidth := max(72, width)
+	separatorWidth := lipgloss.Width(" │ Δ │ ")
+
+	oldLines, oldCRLF := splitLinesWithCRLF(oldText)
+	newLines, newCRLF := splitLinesWithCRLF(newText)
+
+	maxLines := max(len(oldLines), len(newLines))
+	if maxLines < 1 {
+		maxLines = 1
+	}
+	numWidth := len(fmt.Sprintf("%d", maxLines))
+	if numWidth < 1 {
+		numWidth = 1
+	}
+	numColOverhead := 2 * (numWidth + lipgloss.Width(" │ "))
+	cellSpace := usableWidth - separatorWidth - numColOverhead
+	if cellSpace < 48 {
+		cellSpace = 48
+	}
+	leftWidth := max(24, cellSpace/2)
+	rightWidth := max(24, cellSpace-leftWidth)
+
+	var b strings.Builder
+	b.WriteString(renderDiffHeader(leftWidth, rightWidth, numWidth, oldLabel, newLabel))
 
 	rows := sideBySideRows(oldLines, newLines, oldCRLF, newCRLF)
 	if len(rows) == 0 {
 		b.WriteString(renderDiffLine("", "", "=", leftWidth, rightWidth, 0, 0, numWidth, false, false) + "\n")
-		return b.String(), nil
+		return b.String()
 	}
 
 	rows = compactUnchangedRows(rows, 4)
@@ -159,14 +158,14 @@ func buildSideBySideDiff(r model.Repo, item model.CommitItem, width int) (string
 			b.WriteString(renderDiffLine(left, right, marker, leftWidth, rightWidth, lNum, rNum, numWidth, showLCR, showRCR) + "\n")
 		}
 	}
-	return b.String(), nil
+	return b.String()
 }
 
-func renderDiffHeader(leftWidth, rightWidth, numWidth int) string {
+func renderDiffHeader(leftWidth, rightWidth, numWidth int, oldLabel, newLabel string) string {
 	numPad := strings.Repeat(" ", numWidth)
 	numSep := mutedStyle.Render(" │ ")
-	left := labelMauveStyle.Render(padRightVisual("OLD / BASE", leftWidth))
-	right := labelMauveStyle.Render(padRightVisual("NEW / WORKING COPY", rightWidth))
+	left := labelMauveStyle.Render(padRightVisual(truncateVisual(oldLabel, leftWidth), leftWidth))
+	right := labelMauveStyle.Render(padRightVisual(truncateVisual(newLabel, rightWidth), rightWidth))
 	sep := mutedStyle.Render(" │ Δ │ ")
 	rule := mutedStyle.Render(
 		strings.Repeat("─", numWidth) + "─┼─" +
@@ -529,6 +528,99 @@ func buildEOLNote(oldEOL, newEOL string, oldEOF, newEOF bool) string {
 func toCRLF(s string) string {
 	s = normalizeEOL(s)
 	return strings.ReplaceAll(s, "\n", "\r\n")
+}
+
+// buildBranchFileDiff renders one path of a branch comparison side by side.
+// Both sides come straight from the repository, so it works without the file
+// being present in the working copy.
+func buildBranchFileDiff(r model.Repo, ctx model.BranchDiffContext, item model.BranchDiffItem, width int) (string, error) {
+	oldTarget := ctx.Old.PathTarget(item.Path)
+	newTarget := ctx.New.PathTarget(item.Path)
+	status := strings.ToUpper(strings.TrimSpace(item.Status))
+
+	var b strings.Builder
+	b.WriteString("Path:   " + item.Path + "\n")
+	b.WriteString("Status: " + branchDiffStatusText(item) + "\n")
+	b.WriteString(mutedStyle.Render("Old:    "+oldTarget) + "\n")
+	b.WriteString(mutedStyle.Render("New:    "+newTarget) + "\n")
+
+	if item.IsDir {
+		b.WriteString("\n")
+		// A directory that exists on one side only has no counterpart to diff
+		// against; its files show up as their own entries in the list.
+		if strings.HasPrefix(status, "A") {
+			b.WriteString("Directory added on the new side — its files are listed separately.")
+			return b.String(), nil
+		}
+		if strings.HasPrefix(status, "D") {
+			b.WriteString("Directory missing from the new side — its files are listed separately.")
+			return b.String(), nil
+		}
+		// --depth empty keeps the diff to the directory node itself, the same
+		// way the working-copy diff does for a directory entry.
+		out, err := svn.Run(r, "diff", "--depth", "empty", oldTarget, newTarget)
+		if err != nil {
+			return "", fmt.Errorf("svn diff failed for directory %s\n\nOutput:\n%s\n\nError: %w", item.Path, out, err)
+		}
+		if strings.TrimSpace(out) == "" {
+			b.WriteString("Directory entry only — it has no property diff of its own.")
+			return b.String(), nil
+		}
+		b.WriteString(colorizeUnifiedDiff(out))
+		return b.String(), nil
+	}
+
+	var oldText, newText string
+	var err error
+	if !strings.HasPrefix(status, "A") {
+		if oldText, err = readRepoFileTarget(r, oldTarget); err != nil {
+			return "", err
+		}
+	}
+	if !strings.HasPrefix(status, "D") {
+		if newText, err = readRepoFileTarget(r, newTarget); err != nil {
+			return "", err
+		}
+	}
+
+	if isBinaryContent([]byte(oldText)) || isBinaryContent([]byte(newText)) {
+		b.WriteString("\n")
+		b.WriteString(warningStyle.Render("Binary file — no side-by-side view.") + "\n")
+		if out, derr := svn.Run(r, "diff", oldTarget, newTarget); derr == nil && strings.TrimSpace(out) != "" {
+			b.WriteString("\n" + colorizeUnifiedDiff(out))
+		}
+		return b.String(), nil
+	}
+
+	oldEOL, newEOL := detectEOLStyle(oldText), detectEOLStyle(newText)
+	b.WriteString(buildEOLNote(oldEOL, newEOL, hasFinalNewline(oldText), hasFinalNewline(newText)))
+	switch {
+	case strings.HasPrefix(status, "A"):
+		b.WriteString(mutedStyle.Render("Note: added on this side — left column is empty.") + "\n")
+	case strings.HasPrefix(status, "D"):
+		b.WriteString(mutedStyle.Render("Note: deleted on this side — right column is empty.") + "\n")
+	}
+
+	if normalizeEOL(oldText) == normalizeEOL(newText) {
+		out, derr := svn.Run(r, "diff", oldTarget, newTarget)
+		if derr == nil && strings.TrimSpace(out) != "" {
+			b.WriteString("\nContent is identical — SVN reports a property diff:\n\n" + colorizeUnifiedDiff(out))
+			return b.String(), nil
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(renderSideBySideBody(oldText, newText, ctx.Old.Label, ctx.New.Label, width))
+	return b.String(), nil
+}
+
+// readRepoFileTarget reads a repository path pinned to a peg revision.
+func readRepoFileTarget(r model.Repo, target string) (string, error) {
+	out, err := svn.Run(r, "cat", target)
+	if err != nil {
+		return "", fmt.Errorf("svn cat failed for %s\n\nOutput:\n%s\n\nError: %w", target, out, err)
+	}
+	return out, nil
 }
 
 func readBaseFile(r model.Repo, path string) (string, error) {

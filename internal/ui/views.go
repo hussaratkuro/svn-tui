@@ -28,6 +28,10 @@ func (m Model) View() string {
 		return m.viewFileHistorySelect()
 	case model.ScreenBranchSelect:
 		return m.viewBranchSelect()
+	case model.ScreenBranchDiffSelect:
+		return m.viewBranchDiffSelect()
+	case model.ScreenDeleteBranchConfirm:
+		return m.viewDeleteBranchConfirm()
 	case model.ScreenShelfSelect:
 		return m.viewShelfSelect()
 	case model.ScreenPullSelect:
@@ -263,9 +267,19 @@ func (m Model) viewFileHistorySelect() string {
 func (m Model) viewBranchSelect() string {
 	title := "Switch to branch"
 	enterAction := "switch"
-	if m.selectedAction == model.ActionMergeBranch {
+	switch m.selectedAction {
+	case model.ActionMergeBranch:
 		title = "Merge branch"
 		enterAction = "merge"
+	case model.ActionBranchDiffFromStart:
+		title = "Branch diff since branch point"
+		enterAction = "compare"
+	case model.ActionBranchDiffVsTrunk:
+		title = "Branch diff vs trunk HEAD"
+		enterAction = "compare"
+	case model.ActionDeleteBranch:
+		title = "Delete branch"
+		enterAction = "confirm delete"
 	}
 
 	var b strings.Builder
@@ -311,6 +325,93 @@ func (m Model) viewBranchSelect() string {
 		b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("/", "search"), hint("0-9", "jump to number"), hint("Enter", enterAction), hint("Esc", "back")))
 	}
 	return b.String()
+}
+
+func (m Model) viewBranchDiffSelect() string {
+	ctx := m.branchDiffCtx
+
+	var b strings.Builder
+	b.WriteString(m.compactHeader(ctx.Title()))
+
+	items := max(3, m.listInnerHeight()-6)
+	end := min(len(m.branchDiffItems), m.branchDiffOffset+items)
+
+	var c strings.Builder
+	c.WriteString(mutedStyle.Render("Old  ") + labelSapphireStyle.Render(ctx.Old.Label) + "\n")
+	c.WriteString(mutedStyle.Render("New  ") + labelYellowStyle.Render(ctx.New.Label) + "\n")
+	if strings.TrimSpace(ctx.Summary) != "" {
+		c.WriteString(mutedStyle.Render(ctx.Summary) + "\n")
+	}
+	c.WriteString(textStyle.Render(fmt.Sprintf("Changed paths: %d", len(m.branchDiffItems))) + "\n")
+	c.WriteString(mutedStyle.Render("─────────────────────────") + "\n")
+
+	for i := m.branchDiffOffset; i < end; i++ {
+		item := m.branchDiffItems[i]
+		cursor := " "
+		if i == m.branchDiffCursor {
+			cursor = ">"
+		}
+		label := item.Path
+		if item.IsDir && !strings.HasSuffix(label, "/") {
+			label += "/"
+		}
+		if i == m.branchDiffCursor {
+			c.WriteString(selectedStyle.Render(fmt.Sprintf("%s %-4s %s", cursor, item.Status, label)) + "\n")
+			continue
+		}
+		status := statusStyleForPathAction(item.Status[:1]).Render(padRight(item.Status, 4))
+		c.WriteString(normalStyle.Render(cursor+" ") + status + normalStyle.Render(" "+label) + "\n")
+	}
+	c.WriteString("\n")
+	c.WriteString(mutedStyle.Render(scrollHint(m.branchDiffOffset, end, len(m.branchDiffItems))))
+
+	b.WriteString(m.listBox(c.String()))
+	b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("Enter/d", "file diff"), hint("u", "full unified diff"), hint("i", "info"), hint("Esc", "branches"), hint("q", "menu")))
+	return b.String()
+}
+
+func (m Model) viewDeleteBranchConfirm() string {
+	info := m.branchDelete
+
+	var b strings.Builder
+	b.WriteString(m.compactHeader("Delete branch"))
+
+	var c strings.Builder
+	c.WriteString(warningStyle.Render("This deletes the branch from the repository, not just locally.") + "\n")
+	c.WriteString(mutedStyle.Render("It runs: svn delete <branch URL> -m \"Deleting branch ...\"") + "\n\n")
+
+	c.WriteString(mutedStyle.Render("Branch      ") + labelYellowStyle.Render(info.Name) + "\n")
+	c.WriteString(mutedStyle.Render("URL         ") + valueWhiteStyle.Render(info.URL) + "\n")
+	if info.LastRev > 0 {
+		c.WriteString(mutedStyle.Render("Last commit ") +
+			successStyle.Render(fmt.Sprintf("r%d", info.LastRev)) +
+			mutedStyle.Render("  by ") + valueWhiteStyle.Render(orDash(info.Author)) +
+			mutedStyle.Render("  ") + valueWhiteStyle.Render(orDash(info.Date)) + "\n")
+		if strings.TrimSpace(info.Msg) != "" {
+			c.WriteString(mutedStyle.Render("Message     ") + textStyle.Render(info.Msg) + "\n")
+		}
+	} else {
+		c.WriteString(mutedStyle.Render("Last commit ") + mutedStyle.Render("unknown") + "\n")
+	}
+	if info.IsCheckout {
+		c.WriteString("\n" + errorStyle.Render("The working copy is on this branch. After the delete, switch to trunk.") + "\n")
+	}
+
+	c.WriteString("\n" + textStyle.Render("Type "+branchDeleteConfirmWord+" and press Enter to delete it:") + "\n")
+	c.WriteString(m.input.View() + "\n\n")
+	c.WriteString(mutedStyle.Render("Anything else cancels. The branch history stays in the repository, so it can be restored with svn copy from an earlier revision."))
+
+	b.WriteString(m.listBox(c.String()))
+	b.WriteString(statusBar(hint("Enter", "delete branch"), hint("i", "info"), hint("Esc", "cancel")))
+	return b.String()
+}
+
+// orDash keeps a missing log field from rendering as an empty gap.
+func orDash(value string) string {
+	if v := strings.TrimSpace(value); v != "" {
+		return v
+	}
+	return "unknown"
 }
 
 func (m Model) viewShelfSelect() string {
@@ -902,8 +1003,13 @@ func (m Model) viewHistory() string {
 }
 
 func (m Model) viewDiff() string {
+	title := "Side-by-side diff viewer"
+	if m.isBranchDiffAction() {
+		title = m.branchDiffCtx.Title()
+	}
+
 	var b strings.Builder
-	b.WriteString(m.compactHeader("Side-by-side diff viewer"))
+	b.WriteString(m.compactHeader(title))
 
 	vp := m.viewport
 	vp.Height = max(3, m.listInnerHeight()-1)
@@ -967,7 +1073,8 @@ func (m Model) viewResult() string {
 func (m Model) isCompactResultAction() bool {
 	switch m.selectedAction {
 	case model.ActionPull, model.ActionSwitchBranch, model.ActionSwitchTrunk,
-		model.ActionMergeBranch, model.ActionCreateBranch, model.ActionCheckoutRevision:
+		model.ActionMergeBranch, model.ActionCreateBranch, model.ActionCheckoutRevision,
+		model.ActionDeleteBranch:
 		return true
 	}
 	return false
@@ -984,6 +1091,7 @@ func (m Model) viewCompactSuccess() string {
 		model.ActionMergeBranch:      "Merge branch",
 		model.ActionCreateBranch:     "Create branch",
 		model.ActionCheckoutRevision: "Checkout revision",
+		model.ActionDeleteBranch:     "Delete branch",
 	}[m.selectedAction]
 
 	summary := lastMeaningfulLine(m.result)

@@ -84,6 +84,13 @@ type Model struct {
 	partialHunkOffset int
 	partialCommit     bool
 
+	branchDelete model.BranchDeleteInfo
+
+	branchDiffCtx    model.BranchDiffContext
+	branchDiffItems  []model.BranchDiffItem
+	branchDiffCursor int
+	branchDiffOffset int
+
 	conflictItems  []model.ConflictItem
 	conflictCursor int
 	conflictOffset int
@@ -123,6 +130,8 @@ func NewModel(repos []model.Repo) Model {
 		actions: []string{
 			"Pull", "Status", "Revert files", "Commit",
 			"Create branch", "Switch to branch", "Merge branch",
+			"Branch diff (since branch point)", "Branch diff (vs trunk HEAD)",
+			"Delete branch",
 			"Shelve local changes", "Unshelve changes", "Switch to trunk",
 			"Checkout revision", "Resolve conflicts", "Cleanup", "Properties",
 			"Commit history", "File history", "Revision tree", "Quit",
@@ -171,7 +180,49 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.branches = msg.Branches
 		m.branchCursor, m.branchOffset, m.branchNumberInput = 0, 0, ""
 		m.branchFilter, m.branchFilterMode = "", false
+		// A branch diff nearly always targets the branch that is checked out,
+		// so start the cursor there when the working copy is on one.
+		if m.isBranchDiffAction() {
+			m.branchCursor = currentBranchIndex(msg.Branches, m.activeRepo.CurrentLocation)
+			m.branchOffset = adjustOffset(0, m.branchCursor, m.branchListVisibleCount())
+		}
 		m.screen = model.ScreenBranchSelect
+		return m, nil
+
+	case model.BranchDeleteInfoLoadedMsg:
+		if msg.Err != nil {
+			return m.showErrorContent("Failed to load branch details.", "Failed to load branch details.\n\n"+msg.Err.Error()), nil
+		}
+		m.branchDelete = msg.Info
+		m.input.Reset()
+		m.input.Placeholder = branchDeleteConfirmWord
+		m.input.Focus()
+		m.screen = model.ScreenDeleteBranchConfirm
+		return m, nil
+
+	case model.BranchDiffLoadedMsg:
+		if msg.Err != nil {
+			content := "Failed to compare the branch."
+			if strings.TrimSpace(msg.Context.Summary) != "" {
+				content += "\n\n" + msg.Context.Summary
+			}
+			content += "\n\n" + msg.Err.Error()
+			return m.showErrorContent("Failed to compare the branch.", content), nil
+		}
+		m.branchDiffCtx = msg.Context
+		m.branchDiffItems = msg.Items
+		m.branchDiffCursor, m.branchDiffOffset = 0, 0
+		if len(msg.Items) == 0 {
+			m.screen = model.ScreenResult
+			m.err = nil
+			m.result = "No differences found.\n\n" + msg.Context.Old.Label + "  ->  " + msg.Context.New.Label
+			if strings.TrimSpace(msg.Context.Summary) != "" {
+				m.result += "\n" + msg.Context.Summary
+			}
+			m.viewport.SetContent(m.result)
+			return m, nil
+		}
+		m.screen = model.ScreenBranchDiffSelect
 		return m, nil
 
 	case model.ShelvesLoadedMsg:
@@ -467,6 +518,10 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.branchCursor = clamp(m.branchCursor+steps, 0, max(0, len(filtered)-1))
 		m.branchOffset = adjustOffset(m.branchOffset, m.branchCursor, m.branchListVisibleCount())
 
+	case model.ScreenBranchDiffSelect:
+		m.branchDiffCursor = clamp(m.branchDiffCursor+steps, 0, max(0, len(m.branchDiffItems)-1))
+		m.branchDiffOffset = adjustOffset(m.branchDiffOffset, m.branchDiffCursor, m.branchDiffListVisibleCount())
+
 	case model.ScreenShelfSelect:
 		m.shelfCursor = clamp(m.shelfCursor+steps, 0, len(m.shelves)-1)
 		m.shelfOffset = adjustOffset(m.shelfOffset, m.shelfCursor, m.visibleListCount(7))
@@ -565,6 +620,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.screen = model.ScreenRevertSelect
 			case model.ActionShelveChanges:
 				m.screen = model.ScreenShelveSelect
+			case model.ActionBranchDiffFromStart, model.ActionBranchDiffVsTrunk:
+				m.screen = model.ScreenBranchDiffSelect
 			case model.ActionCommitHistory, model.ActionFileHistory, model.ActionRevisionTree:
 				m.screen = model.ScreenHistory
 				m.viewport.SetContent(m.historyContent)
@@ -574,6 +631,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			default:
 				m.screen = model.ScreenCommitSelect
 			}
+		case model.ScreenBranchDiffSelect:
+			m.screen = model.ScreenBranchSelect
+		case model.ScreenDeleteBranchConfirm:
+			m.input.Reset()
+			m.screen = model.ScreenBranchSelect
 		case model.ScreenHistorySearch:
 			m.screen = model.ScreenHistory
 		case model.ScreenPropertyTargetSelect:
@@ -620,6 +682,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updatePropertyValueInput(msg)
 	case model.ScreenBranchSelect:
 		return m.updateBranchSelect(msg)
+	case model.ScreenBranchDiffSelect:
+		return m.updateBranchDiffSelect(msg)
+	case model.ScreenDeleteBranchConfirm:
+		return m.updateDeleteBranchConfirm(msg)
 	case model.ScreenShelfSelect:
 		return m.updateShelfSelect(msg)
 	case model.ScreenPullSelect:
@@ -889,6 +955,12 @@ func (m Model) runAction(action model.Action) (tea.Model, tea.Cmd) {
 	case model.ActionMergeBranch:
 		m.screen, m.runningTitle = model.ScreenRunning, "Loading branches..."
 		return m, loadBranchesCmd(m.activeRepo)
+	case model.ActionBranchDiffFromStart, model.ActionBranchDiffVsTrunk:
+		m.screen, m.runningTitle = model.ScreenRunning, "Loading branches..."
+		return m, loadBranchesCmd(m.activeRepo)
+	case model.ActionDeleteBranch:
+		m.screen, m.runningTitle = model.ScreenRunning, "Loading branches..."
+		return m, loadBranchesCmd(m.activeRepo)
 	case model.ActionShelveChanges:
 		m.screen, m.runningTitle = model.ScreenRunning, "Loading local changes to shelve..."
 		return m, loadShelveItemsCmd(m.activeRepo)
@@ -1022,12 +1094,7 @@ func (m Model) updateBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			selected := filtered[m.branchCursor]
 			m.branchFilter, m.branchFilterMode = "", false
-			if m.selectedAction == model.ActionMergeBranch {
-				m.screen, m.runningTitle = model.ScreenRunning, "Merging branch..."
-				return m, mergeBranchCmd(m.activeRepo, selected.Name)
-			}
-			m.screen, m.runningTitle = model.ScreenRunning, "Switching to branch..."
-			return m, switchBranchCmd(m.activeRepo, selected.Name)
+			return m.startBranchAction(selected)
 		case "backspace", "ctrl+h":
 			if len(m.branchFilter) > 0 {
 				m.branchFilter = m.branchFilter[:len(m.branchFilter)-1]
@@ -1075,12 +1142,7 @@ func (m Model) updateBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		selected := m.branches[selectedIndex]
 		m.branchNumberInput = ""
-		if m.selectedAction == model.ActionMergeBranch {
-			m.screen, m.runningTitle = model.ScreenRunning, "Merging branch..."
-			return m, mergeBranchCmd(m.activeRepo, selected.Name)
-		}
-		m.screen, m.runningTitle = model.ScreenRunning, "Switching to branch..."
-		return m, switchBranchCmd(m.activeRepo, selected.Name)
+		return m.startBranchAction(selected)
 
 	default:
 		if len(key) == 1 && key[0] >= '0' && key[0] <= '9' {
@@ -1097,6 +1159,89 @@ func (m Model) updateBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	m.branchOffset = adjustOffset(m.branchOffset, m.branchCursor, visible)
 	return m, nil
+}
+
+// startBranchAction runs the action the branch list was opened for.
+func (m Model) startBranchAction(selected model.Branch) (tea.Model, tea.Cmd) {
+	switch m.selectedAction {
+	case model.ActionMergeBranch:
+		m.screen, m.runningTitle = model.ScreenRunning, "Merging branch..."
+		return m, mergeBranchCmd(m.activeRepo, selected.Name)
+	case model.ActionBranchDiffFromStart:
+		m.screen, m.runningTitle = model.ScreenRunning, "Comparing branch with its branch point..."
+		return m, loadBranchDiffCmd(m.activeRepo, selected.Name, model.BranchDiffSinceBranchPoint)
+	case model.ActionBranchDiffVsTrunk:
+		m.screen, m.runningTitle = model.ScreenRunning, "Comparing branch with trunk HEAD..."
+		return m, loadBranchDiffCmd(m.activeRepo, selected.Name, model.BranchDiffAgainstTrunkHead)
+	case model.ActionDeleteBranch:
+		// Enter never deletes: it only opens the confirmation screen, which
+		// wants the branch details and a typed-out confirmation first.
+		m.screen, m.runningTitle = model.ScreenRunning, "Loading branch details..."
+		return m, loadBranchDeleteInfoCmd(m.activeRepo, selected.Name)
+	}
+	m.screen, m.runningTitle = model.ScreenRunning, "Switching to branch..."
+	return m, switchBranchCmd(m.activeRepo, selected.Name)
+}
+
+func (m Model) isBranchDiffAction() bool {
+	return m.selectedAction == model.ActionBranchDiffFromStart || m.selectedAction == model.ActionBranchDiffVsTrunk
+}
+
+// currentBranchIndex finds the checked-out branch in the branch list, using the
+// working copy location ("branches/<name>"). It returns 0 when on trunk.
+func currentBranchIndex(branches []model.Branch, location string) int {
+	loc := strings.Trim(strings.TrimSpace(location), "/")
+	if !strings.HasPrefix(loc, "branches/") {
+		return 0
+	}
+	name := strings.TrimPrefix(loc, "branches/")
+	if slash := strings.Index(name, "/"); slash >= 0 {
+		name = name[:slash]
+	}
+	for i, br := range branches {
+		if br.Name == name {
+			return i
+		}
+	}
+	return 0
+}
+
+func (m Model) updateBranchDiffSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visible := m.branchDiffListVisibleCount()
+	m.branchDiffCursor = navigateCursor(m.branchDiffCursor, len(m.branchDiffItems), visible, msg.String())
+
+	switch msg.String() {
+	case "enter", "d":
+		if len(m.branchDiffItems) == 0 {
+			break
+		}
+		m.screen, m.runningTitle = model.ScreenRunning, "Loading side-by-side diff..."
+		return m, branchFileDiffCmd(m.activeRepo, m.branchDiffCtx, m.branchDiffItems[m.branchDiffCursor], m.width-4)
+	case "u":
+		m.screen, m.runningTitle = model.ScreenRunning, "Loading full unified diff..."
+		return m, branchFullDiffCmd(m.activeRepo, m.branchDiffCtx)
+	}
+
+	m.branchDiffOffset = adjustOffset(m.branchDiffOffset, m.branchDiffCursor, visible)
+	return m, nil
+}
+
+func (m Model) updateDeleteBranchConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "enter" {
+		typed := strings.ToLower(strings.TrimSpace(m.input.Value()))
+		if typed != branchDeleteConfirmWord {
+			m.input.Reset()
+			return m.showError(
+				fmt.Sprintf("Branch %s was NOT deleted. Type %s to confirm.", m.branchDelete.Name, branchDeleteConfirmWord),
+				"delete confirmation did not match"), nil
+		}
+		m.input.Reset()
+		m.screen, m.runningTitle = model.ScreenRunning, "Deleting branch..."
+		return m, deleteBranchCmd(m.activeRepo, m.branchDelete.Name)
+	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
 }
 
 func (m Model) updateShelfSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1663,6 +1808,7 @@ func (m Model) inputActive() bool {
 	switch m.screen {
 	case model.ScreenCreateBranchInput,
 		model.ScreenCheckoutRevisionInput,
+		model.ScreenDeleteBranchConfirm,
 		model.ScreenCommitMessageInput,
 		model.ScreenFileHistorySearch,
 		model.ScreenHistorySearch,
@@ -1676,6 +1822,10 @@ func (m Model) inputActive() bool {
 
 func (m Model) branchListVisibleCount() int {
 	return m.visibleListCount(14)
+}
+
+func (m Model) branchDiffListVisibleCount() int {
+	return m.visibleListCount(15)
 }
 
 func (m Model) pullListVisibleCount() int {

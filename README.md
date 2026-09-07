@@ -98,6 +98,46 @@ For large branch lists, you do not need to scroll through the entire branch swam
 - type the branch number and press `Enter`
 - use `Backspace` to edit the typed number
 
+### Branch diff
+
+Two read-only comparisons of a whole branch, both driven from the branch list —
+the cursor starts on the branch the working copy is on:
+
+- **Branch diff (since branch point)** compares the branch as it was created —
+  the trunk state at that moment — with the branch head, so it shows every
+  change committed on the branch.
+- **Branch diff (vs trunk HEAD)** compares today's trunk with the branch head,
+  so it also shows what trunk gained while the branch was open.
+
+Both open a list of the changed paths (`M` modified, `A` added, `D` deleted,
+`R` replaced, trailing `P` for a property change). From there:
+
+- `Enter` or `d` opens one path side by side, read straight from the repository
+- `u` shows the complete unified diff of the comparison (truncated at 2 MB)
+- `Esc` goes back to the branch list
+
+Neither action touches the working copy, and neither needs the branch to be
+checked out.
+
+### Delete branch
+
+Removes a branch from the repository — pick it from the same branch list, but
+`Enter` there never deletes anything. It opens a confirmation screen first,
+which shows what is about to go:
+
+- the branch name and its full URL
+- its last commit: revision, author, date and message
+- a warning when the working copy is on that very branch
+
+The delete only runs once you type `delete` and press `Enter`; anything else is
+refused with a "branch was NOT deleted" message, and `Esc` goes back to the
+branch list. It runs `svn delete <branch URL> -m "Deleting branch ..."`, so the
+branch history stays in the repository and can be restored with `svn copy` from
+an earlier revision.
+
+Deleting the branch the working copy is checked out on is allowed, but the
+result reminds you to switch to trunk afterwards.
+
 ### Unshelve or delete shelves
 
 The Unshelve action lists the shelves stored in `.svn-tui-shelves`.
@@ -417,6 +457,21 @@ SVN_TUI_REPOS="/home/user/dev/:/home/user/dev/another-project" svn-tui
 | number keys | Type branch number |
 | `Backspace` | Edit typed branch number |
 | `Enter` | Switch to highlighted branch or typed branch number |
+
+### Delete branch confirmation screen
+
+| Key | Action |
+| --- | --- |
+| `delete` + `Enter` | Delete the branch from the repository |
+| `Esc` | Cancel and go back to the branch list |
+
+### Branch diff screen
+
+| Key | Action |
+| --- | --- |
+| `Enter` or `d` | Side-by-side diff of the highlighted path |
+| `u` | Full unified diff of the comparison |
+| `Esc` | Back to the branch list |
 
 ### Revision tree screen
 

@@ -1,5 +1,7 @@
 package model
 
+import "strings"
+
 const ShelvesDir = ".svn-tui-shelves"
 
 // ── Screens ──────────────────────────────────────────────────────────────────
@@ -12,6 +14,8 @@ const (
 	ScreenCreateBranchInput
 	ScreenCheckoutRevisionInput
 	ScreenBranchSelect
+	ScreenBranchDiffSelect
+	ScreenDeleteBranchConfirm
 	ScreenShelfSelect
 	ScreenShelveSelect
 	ScreenPullSelect
@@ -46,6 +50,9 @@ const (
 	ActionCreateBranch
 	ActionSwitchBranch
 	ActionMergeBranch
+	ActionBranchDiffFromStart
+	ActionBranchDiffVsTrunk
+	ActionDeleteBranch
 	ActionShelveChanges
 	ActionUnshelveChanges
 	ActionSwitchTrunk
@@ -84,6 +91,96 @@ type Branch struct {
 	Revision int
 }
 
+// BranchDeleteInfo is what the delete confirmation shows about a branch, so the
+// deletion can be verified before it is typed out.
+type BranchDeleteInfo struct {
+	Name       string
+	URL        string
+	LastRev    int
+	Author     string
+	Date       string
+	Msg        string
+	IsCheckout bool
+}
+
+type BranchDeleteInfoLoadedMsg struct {
+	Info   BranchDeleteInfo
+	Output string
+	Err    error
+}
+
+// ── Branch diff ───────────────────────────────────────────────────────────────
+
+// BranchDiffMode selects which two repository states a branch diff compares.
+type BranchDiffMode int
+
+const (
+	// BranchDiffSinceBranchPoint compares the branch as it was created (the
+	// trunk state at that moment) with everything committed on it since.
+	BranchDiffSinceBranchPoint BranchDiffMode = iota
+	// BranchDiffAgainstTrunkHead compares today's trunk with the branch head.
+	BranchDiffAgainstTrunkHead
+)
+
+// BranchDiffSide is one side of a branch comparison: a URL pinned to a
+// revision, plus the label shown above its column.
+type BranchDiffSide struct {
+	URL   string
+	Rev   string
+	Label string
+}
+
+// Target renders the side as an SVN peg-revision target, e.g. URL@1234.
+func (s BranchDiffSide) Target() string {
+	if strings.TrimSpace(s.Rev) == "" {
+		return s.URL
+	}
+	return s.URL + "@" + s.Rev
+}
+
+// PathTarget renders a path below the side as a peg-revision target.
+func (s BranchDiffSide) PathTarget(relPath string) string {
+	url := s.URL
+	if relPath = strings.Trim(relPath, "/"); relPath != "" {
+		url += "/" + relPath
+	}
+	if strings.TrimSpace(s.Rev) == "" {
+		return url
+	}
+	return url + "@" + s.Rev
+}
+
+type BranchDiffContext struct {
+	Mode    BranchDiffMode
+	Branch  string
+	Old     BranchDiffSide
+	New     BranchDiffSide
+	Summary string
+}
+
+func (c BranchDiffContext) Title() string {
+	if c.Mode == BranchDiffAgainstTrunkHead {
+		return "Branch diff vs trunk HEAD"
+	}
+	return "Branch diff since branch point"
+}
+
+type BranchDiffItem struct {
+	// Status is the summarize letter: M, A, D or R, with a trailing P when
+	// only properties changed alongside.
+	Status string
+	// Path is relative to both compared roots.
+	Path  string
+	IsDir bool
+}
+
+type BranchDiffLoadedMsg struct {
+	Context BranchDiffContext
+	Items   []BranchDiffItem
+	Output  string
+	Err     error
+}
+
 // ── Commit items ──────────────────────────────────────────────────────────────
 
 type CommitItem struct {
@@ -107,6 +204,18 @@ type ConflictItem struct {
 type PropertyItem struct {
 	Name  string
 	Value string
+}
+
+// SVNDiffSummarizeXML mirrors "svn diff --summarize --xml".
+type SVNDiffSummarizeXML struct {
+	Paths []SVNDiffPathXML `xml:"paths>path"`
+}
+
+type SVNDiffPathXML struct {
+	Item  string `xml:"item,attr"`
+	Props string `xml:"props,attr"`
+	Kind  string `xml:"kind,attr"`
+	Path  string `xml:",chardata"`
 }
 
 // SVNPropListXML mirrors "svn proplist -v --xml".
