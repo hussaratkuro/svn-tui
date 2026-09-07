@@ -13,6 +13,7 @@ const (
 	ScreenActionSelect
 	ScreenCreateBranchInput
 	ScreenCheckoutRevisionInput
+	ScreenCheckoutRevisionSelect
 	ScreenBranchSelect
 	ScreenBranchMergeSelect
 	ScreenBranchDiffSelect
@@ -27,10 +28,13 @@ const (
 	ScreenConflictSelect
 	ScreenFileHistorySearch
 	ScreenFileHistorySelect
+	ScreenPropertyBrowse
 	ScreenPropertyTargetInput
 	ScreenPropertyTargetSelect
 	ScreenPropertyList
+	ScreenPropertyNameSelect
 	ScreenPropertyNameInput
+	ScreenPropertyValueSelect
 	ScreenPropertyValueInput
 	ScreenHistory
 	ScreenHistorySearch
@@ -196,6 +200,31 @@ type BranchDiffLoadedMsg struct {
 	Err     error
 }
 
+// ── Checkout revision ─────────────────────────────────────────────────────────
+
+// CheckoutRevision is one searchable row of the repository log offered by the
+// checkout revision picker. Paths keeps the changed paths of the commit so a
+// revision can be found by the file it touched, not only by its message.
+type CheckoutRevision struct {
+	Revision int
+	Author   string
+	Date     string
+	Msg      string
+	Paths    []CheckoutPath
+}
+
+// CheckoutPath is one path changed by a revision, with the svn log action
+// letter (A, M, D, R) it was changed with.
+type CheckoutPath struct {
+	Action string
+	Path   string
+}
+
+type CheckoutRevisionsLoadedMsg struct {
+	Items []CheckoutRevision
+	Err   error
+}
+
 // ── Commit items ──────────────────────────────────────────────────────────────
 
 type CommitItem struct {
@@ -223,6 +252,47 @@ type ConflictItem struct {
 type PropertyItem struct {
 	Name  string
 	Value string
+}
+
+// PropertyBrowseKind tells the browser what one row is: the directory the user
+// is standing in, the way back up, or a child of the current directory.
+type PropertyBrowseKind int
+
+const (
+	PropertyBrowseSelf PropertyBrowseKind = iota
+	PropertyBrowseParent
+	PropertyBrowseDir
+	PropertyBrowseFile
+)
+
+// PropertyBrowseEntry is one row of the property browser. Props is filled in
+// while the directory is listed, so the side pane never has to load anything
+// when the cursor moves.
+type PropertyBrowseEntry struct {
+	Label       string
+	Path        string
+	Kind        PropertyBrowseKind
+	Props       []PropertyItem
+	Unversioned bool
+}
+
+// SVNStatusXML mirrors "svn status --xml". Only the entry kind is needed: an
+// unversioned path cannot carry properties.
+type SVNStatusXML struct {
+	Targets []SVNStatusTargetXML `xml:"target"`
+}
+
+type SVNStatusTargetXML struct {
+	Entries []SVNStatusEntryXML `xml:"entry"`
+}
+
+type SVNStatusEntryXML struct {
+	Path     string         `xml:"path,attr"`
+	WCStatus SVNWCStatusXML `xml:"wc-status"`
+}
+
+type SVNWCStatusXML struct {
+	Item string `xml:"item,attr"`
 }
 
 // SVNDiffSummarizeXML mirrors "svn diff --summarize --xml".
@@ -325,6 +395,16 @@ type PropertyTargetsLoadedMsg struct {
 	Query string
 	Items []string
 	Err   error
+}
+
+type PropertyBrowseLoadedMsg struct {
+	Dir     string
+	Entries []PropertyBrowseEntry
+	// Select is the path the cursor should land on, so stepping out of a
+	// directory puts the cursor back on the directory just left.
+	Select string
+	Err    error
+	Notice string
 }
 
 type PropertiesLoadedMsg struct {

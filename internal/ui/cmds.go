@@ -802,6 +802,64 @@ func cleanupCmd(r model.Repo) tea.Cmd {
 	})
 }
 
+// checkoutRevisionLogLimit caps how much history the revision picker loads. The
+// log is cached on disk between runs, so later searches only fetch the
+// revisions committed since the last one.
+const checkoutRevisionLogLimit = 500
+
+// loadCheckoutRevisionsCmd loads the log of the checked-out URL for the
+// revision picker. It asks for the verbose log so a revision can also be found
+// by a path it changed.
+func loadCheckoutRevisionsCmd(r model.Repo) tea.Cmd {
+	return func() tea.Msg {
+		target := strings.TrimSpace(r.URL)
+		if target == "" {
+			target = strings.TrimSpace(svn.GetCurrentURL(r))
+		}
+		entries, err := svn.FetchLogIncremental(r, "checkout_revisions_"+target, target, checkoutRevisionLogLimit, false)
+		if err != nil {
+			return model.CheckoutRevisionsLoadedMsg{Err: fmt.Errorf("svn log failed\n\nTarget: %s\n\nError: %w", target, err)}
+		}
+		items := checkoutRevisionsFromLog(entries)
+		if len(items) == 0 {
+			return model.CheckoutRevisionsLoadedMsg{Err: fmt.Errorf("no SVN log entries found for %s", target)}
+		}
+		return model.CheckoutRevisionsLoadedMsg{Items: items}
+	}
+}
+
+func checkoutRevisionsFromLog(entries []model.SVNLogEntryXML) []model.CheckoutRevision {
+	revisions := make([]model.CheckoutRevision, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Revision <= 0 {
+			continue
+		}
+		paths := make([]model.CheckoutPath, 0, len(entry.Paths))
+		for _, p := range entry.Paths {
+			changed := strings.TrimSpace(p.Path)
+			if changed == "" {
+				continue
+			}
+			paths = append(paths, model.CheckoutPath{
+				Action: strings.TrimSpace(p.Action),
+				Path:   changed,
+			})
+		}
+		sort.SliceStable(paths, func(i, j int) bool { return paths[i].Path < paths[j].Path })
+		revisions = append(revisions, model.CheckoutRevision{
+			Revision: entry.Revision,
+			Author:   strings.TrimSpace(entry.Author),
+			Date:     formatSVNLogDate(entry.Date),
+			Msg:      compactOneLine(entry.Msg),
+			Paths:    paths,
+		})
+	}
+	sort.SliceStable(revisions, func(i, j int) bool {
+		return revisions[i].Revision > revisions[j].Revision
+	})
+	return revisions
+}
+
 func checkoutRevisionCmd(r model.Repo, revision string) tea.Cmd {
 	return startStreamingCommand(func(emit func(string)) model.CommandResult {
 		var output strings.Builder

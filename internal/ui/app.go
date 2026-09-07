@@ -55,6 +55,12 @@ type Model struct {
 	mergeCursor       int
 	mergeOffset       int
 
+	checkoutRevisions     []model.CheckoutRevision
+	checkoutRevQuery      string
+	checkoutRevFilterMode bool
+	checkoutRevCursor     int
+	checkoutRevOffset     int
+
 	shelves        []string
 	shelfCursor    int
 	shelfOffset    int
@@ -65,6 +71,15 @@ type Model struct {
 	fileHistoryCursor int
 	fileHistoryOffset int
 
+	propertyBrowseDir     string
+	propertyBrowseEntries []model.PropertyBrowseEntry
+	propertyBrowseCursor  int
+	propertyBrowseOffset  int
+	propertyBrowseNotice  string
+	// propertyAddFromBrowse marks an "a" pressed in the browser: Esc out of the
+	// name input then has no property list to return to.
+	propertyAddFromBrowse bool
+
 	propertyTargets      []string
 	propertyTargetCursor int
 	propertyTargetOffset int
@@ -74,6 +89,13 @@ type Model struct {
 	propertyOffset       int
 	propertyName         string
 	propertyEditing      bool
+	propertyTargetIsDir  bool
+	propertyNameChoices  []propertyChoice
+	propertyNameCursor   int
+	propertyNameOffset   int
+	propertyValueChoices []propertyValueChoice
+	propertyValueCursor  int
+	propertyValueOffset  int
 	propertyDeleteIdx    int
 	propertyNotice       string
 
@@ -288,6 +310,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = model.ScreenPropertyTargetSelect
 		return m, nil
 
+	case model.PropertyBrowseLoadedMsg:
+		if msg.Err != nil {
+			return m.showError("Failed to list "+msg.Dir+".", msg.Err.Error()), nil
+		}
+		m.propertyBrowseDir = msg.Dir
+		m.propertyBrowseEntries = msg.Entries
+		m.propertyBrowseNotice = msg.Notice
+		m.propertyBrowseCursor = 0
+		if msg.Select != "" {
+			for i, entry := range msg.Entries {
+				if entry.Path == msg.Select && entry.Kind != model.PropertyBrowseParent {
+					m.propertyBrowseCursor = i
+					break
+				}
+			}
+		}
+		m.propertyBrowseOffset = adjustOffset(0, m.propertyBrowseCursor, m.propertyBrowseVisibleCount())
+		m.screen = model.ScreenPropertyBrowse
+		return m, nil
+
 	case model.PropertiesLoadedMsg:
 		if msg.Err != nil {
 			return m.showError("Failed to read properties of "+msg.Target+".", msg.Err.Error()), nil
@@ -394,6 +436,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.historyCursor = 0
 		m.viewport.SetContent(m.historyContent)
 		m.viewport.GotoTop()
+		return m, nil
+
+	case model.CheckoutRevisionsLoadedMsg:
+		if msg.Err != nil {
+			return m.showError("Failed to load revisions to search.", msg.Err.Error()), nil
+		}
+		m.checkoutRevisions = msg.Items
+		m.checkoutRevFilterMode = false
+		m.checkoutRevCursor, m.checkoutRevOffset = 0, 0
+		m.screen = model.ScreenCheckoutRevisionSelect
 		return m, nil
 
 	case model.FileHistoryMatchesLoadedMsg:
@@ -551,6 +603,11 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.mergeCursor = clamp(m.mergeCursor+steps, 0, max(0, total-1))
 		m.mergeOffset = adjustOffset(m.mergeOffset, m.mergeCursor, m.branchMergeListVisibleCount())
 
+	case model.ScreenCheckoutRevisionSelect:
+		filtered := m.filteredCheckoutRevisions()
+		m.checkoutRevCursor = clamp(m.checkoutRevCursor+steps, 0, max(0, len(filtered)-1))
+		m.checkoutRevOffset = adjustOffset(m.checkoutRevOffset, m.checkoutRevCursor, m.checkoutRevisionListVisibleCount())
+
 	case model.ScreenBranchDiffSelect:
 		m.branchDiffCursor = clamp(m.branchDiffCursor+steps, 0, max(0, len(m.branchDiffItems)-1))
 		m.branchDiffOffset = adjustOffset(m.branchDiffOffset, m.branchDiffCursor, m.branchDiffListVisibleCount())
@@ -671,6 +728,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			default:
 				m.screen = model.ScreenCommitSelect
 			}
+		case model.ScreenCheckoutRevisionSelect:
+			if m.checkoutRevFilterMode {
+				m.checkoutRevFilterMode = false
+				return m, nil
+			}
+			m.input.Focus()
+			m.screen = model.ScreenCheckoutRevisionInput
 		case model.ScreenBranchDiffSelect:
 			m.screen = model.ScreenBranchSelect
 		case model.ScreenBranchMergeSelect:
@@ -680,19 +744,59 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = model.ScreenBranchSelect
 		case model.ScreenHistorySearch:
 			m.screen = model.ScreenHistory
+		case model.ScreenPropertyTargetInput:
+			if m.propertyBrowseDir != "" {
+				m.screen = model.ScreenPropertyBrowse
+			} else {
+				m.screen = model.ScreenActionSelect
+			}
 		case model.ScreenPropertyTargetSelect:
 			m.input.Focus()
 			m.screen = model.ScreenPropertyTargetInput
 		case model.ScreenPropertyList:
 			if len(m.propertyTargets) > 0 {
 				m.screen = model.ScreenPropertyTargetSelect
+			} else if m.propertyBrowseDir != "" {
+				// A property may have been set or deleted, so the browser is
+				// reloaded rather than redrawn from stale entries.
+				m.screen = model.ScreenPropertyBrowse
+				return m, browsePropertyDirCmd(m.activeRepo, m.propertyBrowseDir, m.propertyTarget, "")
 			} else {
 				m.input.Focus()
 				m.screen = model.ScreenPropertyTargetInput
 			}
-		case model.ScreenPropertyNameInput, model.ScreenPropertyValueInput:
-			m.propertyEditing = false
+		case model.ScreenPropertyNameSelect:
+			m.propertyDeleteIdx = -1
+			if m.propertyAddFromBrowse {
+				m.propertyAddFromBrowse = false
+				m.screen = model.ScreenPropertyBrowse
+				break
+			}
 			m.screen = model.ScreenPropertyList
+		case model.ScreenPropertyNameInput:
+			// The typed name is only reachable from the picker.
+			m.screen = model.ScreenPropertyNameSelect
+		case model.ScreenPropertyValueSelect:
+			// Editing came from the property list; picking a value came from
+			// the name picker.
+			if m.propertyEditing {
+				m.propertyEditing = false
+				m.screen = model.ScreenPropertyList
+				break
+			}
+			m.screen = model.ScreenPropertyNameSelect
+		case model.ScreenPropertyValueInput:
+			if def, ok := propertyDefFor(m.propertyName); ok && len(def.Values) > 0 {
+				// The typed value is only reachable from the value picker.
+				m.screen = model.ScreenPropertyValueSelect
+				break
+			}
+			if m.propertyEditing {
+				m.propertyEditing = false
+				m.screen = model.ScreenPropertyList
+				break
+			}
+			m.screen = model.ScreenPropertyNameSelect
 		default:
 			m.screen = model.ScreenActionSelect
 		}
@@ -708,18 +812,26 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateCreateBranchInput(msg)
 	case model.ScreenCheckoutRevisionInput:
 		return m.updateCheckoutRevisionInput(msg)
+	case model.ScreenCheckoutRevisionSelect:
+		return m.updateCheckoutRevisionSelect(msg)
 	case model.ScreenFileHistorySearch:
 		return m.updateFileHistorySearch(msg)
 	case model.ScreenFileHistorySelect:
 		return m.updateFileHistorySelect(msg)
+	case model.ScreenPropertyBrowse:
+		return m.updatePropertyBrowse(msg)
 	case model.ScreenPropertyTargetInput:
 		return m.updatePropertyTargetInput(msg)
 	case model.ScreenPropertyTargetSelect:
 		return m.updatePropertyTargetSelect(msg)
 	case model.ScreenPropertyList:
 		return m.updatePropertyList(msg)
+	case model.ScreenPropertyNameSelect:
+		return m.updatePropertyNameSelect(msg)
 	case model.ScreenPropertyNameInput:
 		return m.updatePropertyNameInput(msg)
+	case model.ScreenPropertyValueSelect:
+		return m.updatePropertyValueSelect(msg)
 	case model.ScreenPropertyValueInput:
 		return m.updatePropertyValueInput(msg)
 	case model.ScreenBranchSelect:
@@ -1018,7 +1130,7 @@ func (m Model) runAction(action model.Action) (tea.Model, tea.Cmd) {
 		return m, loadRevertItemsCmd(m.activeRepo)
 	case model.ActionCheckoutRevision:
 		m.input.Reset()
-		m.input.Placeholder = "Revision number, e.g. 12345"
+		m.input.Placeholder = "Revision number, or search text"
 		m.input.Focus()
 		m.screen = model.ScreenCheckoutRevisionInput
 	case model.ActionCreateBranch:
@@ -1057,11 +1169,15 @@ func (m Model) runAction(action model.Action) (tea.Model, tea.Cmd) {
 		m.screen, m.runningTitle = model.ScreenRunning, "Cleaning up working copy..."
 		return m, cleanupCmd(m.activeRepo)
 	case model.ActionProperties:
-		m.input.Reset()
-		m.input.Placeholder = "Path to inspect, empty = working copy root"
-		m.input.Focus()
-		m.propertyTarget, m.propertyNotice = "", ""
-		m.screen = model.ScreenPropertyTargetInput
+		// The browser is the way in: walking the working copy beats typing a
+		// path, and the search stays one "/" away.
+		m.propertyTargets = nil
+		m.propertyTarget, m.propertyNotice, m.propertyBrowseNotice = "", "", ""
+		m.propertyBrowseDir = "."
+		m.propertyBrowseEntries = nil
+		m.propertyBrowseCursor, m.propertyBrowseOffset = 0, 0
+		m.screen, m.runningTitle = model.ScreenRunning, "Reading the working copy root..."
+		return m, browsePropertyDirCmd(m.activeRepo, ".", "", "")
 	case model.ActionCommitHistory:
 		m.screen, m.runningTitle = model.ScreenRunning, "Loading commit history..."
 		return m, loadHistoryCmd(m.activeRepo)
@@ -1094,23 +1210,150 @@ func (m Model) updateCreateBranchInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// updateCheckoutRevisionInput never checks anything out on its own: Enter
+// always opens the revision picker, so what is about to be checked out — the
+// commit message and the files it changed — can be read first. An empty box
+// lists every loaded revision.
 func (m Model) updateCheckoutRevisionInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "enter" {
-		revision := strings.TrimSpace(m.input.Value())
-		if revision == "" {
-			return m.showError("Please enter an SVN revision number.", "revision number is required"), nil
-		}
-		for _, ch := range revision {
-			if ch < '0' || ch > '9' {
-				return m.showError("Revision must be a number, e.g. 12345.", fmt.Sprintf("invalid revision number: %s", revision)), nil
-			}
-		}
-		m.screen, m.runningTitle = model.ScreenRunning, "Checking out revision..."
-		return m, checkoutRevisionCmd(m.activeRepo, revision)
+		return m.startCheckoutRevisionSearch(strings.TrimSpace(m.input.Value()))
 	}
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
+}
+
+// startCheckoutRevisionSearch opens the picker on the given query, reusing the
+// log already loaded in this session so refining a search costs no svn call.
+func (m Model) startCheckoutRevisionSearch(query string) (tea.Model, tea.Cmd) {
+	m.checkoutRevQuery = query
+	m.checkoutRevFilterMode = false
+	m.checkoutRevCursor, m.checkoutRevOffset = 0, 0
+	if len(m.checkoutRevisions) > 0 {
+		m.screen = model.ScreenCheckoutRevisionSelect
+		return m, nil
+	}
+	m.screen, m.runningTitle = model.ScreenRunning, "Loading revisions..."
+	return m, loadCheckoutRevisionsCmd(m.activeRepo)
+}
+
+// updateCheckoutRevisionSelect drives the revision picker. "/" edits the search
+// in place so the list can be narrowed without leaving the screen.
+func (m Model) updateCheckoutRevisionSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	visible := m.checkoutRevisionListVisibleCount()
+	key := msg.String()
+	filtered := m.filteredCheckoutRevisions()
+
+	if m.checkoutRevFilterMode {
+		switch key {
+		case "enter":
+			if len(filtered) == 0 {
+				break
+			}
+			m.checkoutRevFilterMode = false
+			return m.startCheckoutOfRevision(filtered[m.checkoutRevCursor])
+		case "backspace", "ctrl+h":
+			if len(m.checkoutRevQuery) > 0 {
+				m.checkoutRevQuery = m.checkoutRevQuery[:len(m.checkoutRevQuery)-1]
+				m.checkoutRevCursor, m.checkoutRevOffset = 0, 0
+			}
+		case "up", "k", "down", "j", "pgup", "pgdown", "home", "end":
+			m.checkoutRevCursor = navigateCursor(m.checkoutRevCursor, len(filtered), visible, key)
+		default:
+			if len(key) == 1 && key >= " " {
+				m.checkoutRevQuery += key
+				m.checkoutRevCursor, m.checkoutRevOffset = 0, 0
+			}
+		}
+		filtered = m.filteredCheckoutRevisions()
+		m.checkoutRevCursor = clamp(m.checkoutRevCursor, 0, max(0, len(filtered)-1))
+		m.checkoutRevOffset = adjustOffset(m.checkoutRevOffset, m.checkoutRevCursor, visible)
+		return m, nil
+	}
+
+	switch key {
+	case "/":
+		m.checkoutRevFilterMode = true
+	case "enter":
+		if len(filtered) == 0 {
+			break
+		}
+		return m.startCheckoutOfRevision(filtered[m.checkoutRevCursor])
+	default:
+		m.checkoutRevCursor = navigateCursor(m.checkoutRevCursor, len(filtered), visible, key)
+	}
+
+	m.checkoutRevOffset = adjustOffset(m.checkoutRevOffset, m.checkoutRevCursor, visible)
+	return m, nil
+}
+
+func (m Model) startCheckoutOfRevision(rev model.CheckoutRevision) (tea.Model, tea.Cmd) {
+	revision := strconv.Itoa(rev.Revision)
+	m.screen, m.runningTitle = model.ScreenRunning, "Checking out revision r"+revision+"..."
+	return m, checkoutRevisionCmd(m.activeRepo, revision)
+}
+
+// filteredCheckoutRevisions narrows the loaded log with the current search
+// text. Every whitespace-separated term has to match, so adding a word narrows
+// the list instead of widening it.
+func (m Model) filteredCheckoutRevisions() []model.CheckoutRevision {
+	return filterCheckoutRevisions(m.checkoutRevisions, m.checkoutRevQuery)
+}
+
+func filterCheckoutRevisions(revisions []model.CheckoutRevision, query string) []model.CheckoutRevision {
+	terms := strings.Fields(strings.ToLower(query))
+	if len(terms) == 0 {
+		return revisions
+	}
+	var result []model.CheckoutRevision
+	for _, rev := range revisions {
+		haystack := checkoutRevisionHaystack(rev)
+		matches := true
+		for _, term := range terms {
+			if !strings.Contains(haystack, term) {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			result = append(result, rev)
+		}
+	}
+	return result
+}
+
+// checkoutRevisionHaystack is what a search term is matched against: the
+// revision number (with and without the r prefix), the author, the date, the
+// message and every changed path.
+func checkoutRevisionHaystack(rev model.CheckoutRevision) string {
+	var b strings.Builder
+	b.WriteString("r")
+	b.WriteString(strconv.Itoa(rev.Revision))
+	b.WriteString(" " + rev.Author)
+	b.WriteString(" " + rev.Date)
+	b.WriteString(" " + rev.Msg)
+	for _, p := range rev.Paths {
+		b.WriteString(" " + p.Path)
+	}
+	return strings.ToLower(b.String())
+}
+
+// checkoutRevisionMatchedPath returns the changed path that put a row in the
+// list, so a search by file name shows which file it hit. It is empty when the
+// commit message already carries the term.
+func checkoutRevisionMatchedPath(rev model.CheckoutRevision, query string) string {
+	msg := strings.ToLower(rev.Msg)
+	for _, term := range strings.Fields(strings.ToLower(query)) {
+		if strings.Contains(msg, term) {
+			continue
+		}
+		for _, p := range rev.Paths {
+			if strings.Contains(strings.ToLower(p.Path), term) {
+				return p.Path
+			}
+		}
+	}
+	return ""
 }
 
 func (m Model) updateFileHistorySearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1819,26 +2062,19 @@ func (m Model) updatePropertyList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "a":
-		m.propertyEditing = false
-		m.propertyName = ""
-		m.propertyNotice = ""
-		m.input.Reset()
-		m.input.Placeholder = "Property name, e.g. svn:ignore"
-		m.input.Focus()
-		m.screen = model.ScreenPropertyNameInput
+		return m.startPropertyPick(m.propertyTarget, pathIsDir(m.activeRepo, m.propertyTarget), m.propertyItems, false), nil
 	case "e", "enter":
 		if len(m.propertyItems) == 0 {
 			break
 		}
 		item := m.propertyItems[m.propertyCursor]
 		m.propertyEditing = true
-		m.propertyName = item.Name
 		m.propertyNotice = ""
-		m.input.Reset()
-		m.input.SetValue(collapsePropertyValue(item.Value))
-		m.input.Placeholder = "Property value"
-		m.input.Focus()
-		m.screen = model.ScreenPropertyValueInput
+		// A property with a documented set of values is picked, not typed.
+		if def, ok := propertyDefFor(item.Name); ok && len(def.Values) > 0 {
+			return m.startPropertyValuePick(item.Name, def.Values, item.Value), nil
+		}
+		return m.startPropertyValueInput(item.Name, item.Value), nil
 	case "delete":
 		if len(m.propertyItems) == 0 {
 			break
@@ -1914,7 +2150,7 @@ func (m Model) headerLines() int {
 }
 
 func (m Model) inputActive() bool {
-	if m.branchFilterMode || m.actionFilterMode {
+	if m.branchFilterMode || m.actionFilterMode || m.checkoutRevFilterMode {
 		return true
 	}
 	switch m.screen {
@@ -1938,6 +2174,24 @@ func (m Model) branchListVisibleCount() int {
 
 func (m Model) branchMergeListVisibleCount() int {
 	return max(2, (m.listInnerHeight()-5)/2)
+}
+
+// checkoutRevisionListVisibleCount counts rows, not lines: each revision takes
+// two lines, below the search line, the hint line and the separator, above the
+// blank line, the scroll hint and the detail panel.
+func (m Model) checkoutRevisionListVisibleCount() int {
+	return max(2, (m.listInnerHeight()-5-m.checkoutRevisionDetailHeight())/2)
+}
+
+// checkoutRevisionDetailHeight is how many lines the panel below the list gets
+// for the selected revision. It is dropped altogether on a short terminal,
+// where the list itself needs every line.
+func (m Model) checkoutRevisionDetailHeight() int {
+	inner := m.listInnerHeight()
+	if inner < 18 {
+		return 0
+	}
+	return clamp(inner/3, 7, 12)
 }
 
 func (m Model) branchDiffListVisibleCount() int {

@@ -216,19 +216,50 @@ SVN insists the working copy is locked.
 
 Views and edits SVN properties on any path in the working copy.
 
-- the search box picks the path; an empty search opens the working copy root
-  (`.`), where a merge records `svn:mergeinfo`
-- directories are listed before files, since properties usually live on them
-- the list shows each property with a 3-line preview of its value, so a 38-line
-  `svn:mergeinfo` does not fill the screen
-- `a` adds a property (name, then value), `Enter`/`e` edits the value of the
-  selected one, `Del` removes it (press twice to confirm)
+It opens a browser of the working copy, so a path never has to be typed. The
+left column lists the current directory — itself first (`.`, where a merge
+records `svn:mergeinfo`), then `..`, then subdirectories, then files — with a
+`● n` marker for the paths that already carry properties and `?` for the
+unversioned ones. The right pane shows the properties of the highlighted path
+and what can be done with it:
+
+- `↑↓`/`jk` move, `→`/`Enter` steps into a directory, `←` steps back up
+- `Enter` on a file or on the `.` row opens the property manager for it, `p`
+  does the same for the directory under the cursor
+- `a` sets a property on the highlighted path — the name comes from a list, not
+  from the keyboard
+- `r` re-reads the current directory, `/` falls back to the path search for a
+  deep path, and `Esc` from the search returns to the browser
+- in the property manager the list shows each property with a 3-line preview of
+  its value, so a 38-line `svn:mergeinfo` does not fill the screen; `a` adds,
+  `Enter`/`e` edits the value of the selected one, `Del` removes it (press twice
+  to confirm)
+
+Properties are picked from a list rather than typed. `a` opens the properties
+SVN documents for the kind of path under the cursor — `svn:ignore`,
+`svn:global-ignores`, `svn:externals`, `svn:auto-props` and `svn:mergeinfo` on a
+directory, `svn:eol-style`, `svn:executable`, `svn:needs-lock`, `svn:keywords`,
+`svn:mime-type` and `svn:mergeinfo` on a file — each with a one-line
+explanation, the ones already set marked `●` with their current value, and `Del`
+to remove one. The last row is there for a name of your own.
+
+Properties whose values are a fixed set are picked the same way: `svn:eol-style`
+offers native/LF/CRLF/CR, `svn:executable` and `svn:needs-lock` offer `*`,
+`svn:keywords` and `svn:mime-type` offer the usual values, and the value the
+path carries today is where the cursor starts. `Enter` sets it right there —
+editing one of these from the property list opens the same picker. Everything
+else (`svn:ignore`, `svn:externals`, …) opens the value editor, prefilled with
+the current value and with a placeholder showing the format it expects.
+
+A narrow terminal drops the side pane and folds the property names under each
+row instead.
 
 Values are entered on one line; type `\n` for a line break, which `svn:ignore`
 and `svn:mergeinfo` need. Editing prefills the current value in the same form.
 
-Behind the scenes this is `svn proplist -v --xml`, `svn propset`, and
-`svn propdel`. Properties are local changes until committed — the path shows up
+Behind the scenes this is `svn proplist -v --xml` (`--depth immediates` while
+browsing, so one call covers a whole directory), `svn status --xml` for the
+unversioned marker, `svn propset`, and `svn propdel`. Properties are local changes until committed — the path shows up
 in the commit list as a property-only change.
 
 ### Commit history

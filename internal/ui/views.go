@@ -23,6 +23,8 @@ func (m Model) View() string {
 		return m.viewCreateBranchInput()
 	case model.ScreenCheckoutRevisionInput:
 		return m.viewCheckoutRevisionInput()
+	case model.ScreenCheckoutRevisionSelect:
+		return m.viewCheckoutRevisionSelect()
 	case model.ScreenFileHistorySearch:
 		return m.viewFileHistorySearch()
 	case model.ScreenFileHistorySelect:
@@ -51,14 +53,20 @@ func (m Model) View() string {
 		return m.viewRevertSelect()
 	case model.ScreenConflictSelect:
 		return m.viewConflictSelect()
+	case model.ScreenPropertyBrowse:
+		return m.viewPropertyBrowse()
 	case model.ScreenPropertyTargetInput:
 		return m.viewPropertyTargetInput()
 	case model.ScreenPropertyTargetSelect:
 		return m.viewPropertyTargetSelect()
 	case model.ScreenPropertyList:
 		return m.viewPropertyList()
+	case model.ScreenPropertyNameSelect:
+		return m.viewPropertyNameSelect()
 	case model.ScreenPropertyNameInput:
 		return m.viewPropertyNameInput()
+	case model.ScreenPropertyValueSelect:
+		return m.viewPropertyValueSelect()
 	case model.ScreenPropertyValueInput:
 		return m.viewPropertyValueInput()
 	case model.ScreenHistory, model.ScreenHistorySearch:
@@ -220,12 +228,140 @@ func (m Model) viewCheckoutRevisionInput() string {
 	b.WriteString(m.compactHeader("Checkout revision"))
 	var c strings.Builder
 	c.WriteString(mutedStyle.Render("This runs: svn update -r REVISION") + "\n\n")
-	c.WriteString(textStyle.Render("Revision number:") + "\n")
+	c.WriteString(textStyle.Render("Search revisions:") + "\n")
 	c.WriteString(m.input.View() + "\n\n")
+	c.WriteString(mutedStyle.Render("Searches the revision number, the author, the commit message") + "\n")
+	c.WriteString(mutedStyle.Render("and the changed file paths. An empty search lists every revision.") + "\n")
+	c.WriteString(mutedStyle.Render("Nothing is checked out until a revision is picked from the results.") + "\n\n")
 	c.WriteString(warningStyle.Render("Note: Pull will update the working copy back to HEAD."))
 	b.WriteString(m.listBox(c.String()))
-	b.WriteString(statusBar(hint("Enter", "checkout revision"), hint("i", "info"), hint("Esc", "back")))
+	b.WriteString(statusBar(hint("Enter", "search"), hint("i", "info"), hint("Esc", "back")))
 	return b.String()
+}
+
+func (m Model) viewCheckoutRevisionSelect() string {
+	var b strings.Builder
+	b.WriteString(m.compactHeader("Checkout revision"))
+
+	filtered := m.filteredCheckoutRevisions()
+	visible := m.checkoutRevisionListVisibleCount()
+	end := min(len(filtered), m.checkoutRevOffset+visible)
+	lineWidth := max(20, m.width-8)
+
+	var c strings.Builder
+	if m.checkoutRevFilterMode {
+		c.WriteString(labelYellowStyle.Render("/") + valueWhiteStyle.Render(m.checkoutRevQuery+"_") +
+			mutedStyle.Render(fmt.Sprintf("  %d/%d  Enter: checkout | Esc: stop editing", len(filtered), len(m.checkoutRevisions))) + "\n")
+	} else {
+		query := strings.TrimSpace(m.checkoutRevQuery)
+		if query == "" {
+			query = "(every loaded revision)"
+		}
+		c.WriteString(mutedStyle.Render("Search: ") + valueWhiteStyle.Render(query) +
+			mutedStyle.Render(fmt.Sprintf("  %d/%d", len(filtered), len(m.checkoutRevisions))) + "\n")
+	}
+	c.WriteString(mutedStyle.Render("Matches revision number, author, message and changed paths.") + "\n")
+	c.WriteString(mutedStyle.Render("─────────────────────────") + "\n")
+
+	for i := m.checkoutRevOffset; i < end; i++ {
+		rev := filtered[i]
+		cursor := "  "
+		if i == m.checkoutRevCursor {
+			cursor = "> "
+		}
+		meta := fmt.Sprintf("%sr%d", cursor, rev.Revision)
+		if rev.Author != "" {
+			meta += "  " + rev.Author
+		}
+		if rev.Date != "" {
+			meta += "  " + rev.Date
+		}
+		if path := checkoutRevisionMatchedPath(rev, m.checkoutRevQuery); path != "" {
+			meta += "  · " + path
+		}
+		message := rev.Msg
+		if message == "" {
+			message = "(no commit message)"
+		}
+		message = "    " + message
+		if i == m.checkoutRevCursor {
+			c.WriteString(selectedStyle.Render(truncateVisual(meta, lineWidth)) + "\n")
+			c.WriteString(selectedStyle.Render(truncateVisual(message, lineWidth)) + "\n")
+		} else {
+			c.WriteString(labelSapphireStyle.Render(truncateVisual(meta, lineWidth)) + "\n")
+			c.WriteString(normalStyle.Render(truncateVisual(message, lineWidth)) + "\n")
+		}
+	}
+	if len(filtered) == 0 {
+		c.WriteString(mutedStyle.Render("  no revision matches "+m.checkoutRevQuery) + "\n")
+	}
+	c.WriteString("\n")
+	c.WriteString(mutedStyle.Render(scrollHint(m.checkoutRevOffset, end, len(filtered))) + "\n")
+	if len(filtered) > 0 {
+		c.WriteString(m.checkoutRevisionDetail(filtered[m.checkoutRevCursor], lineWidth))
+	}
+
+	b.WriteString(m.listBox(c.String()))
+	if m.checkoutRevFilterMode {
+		b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("Enter", "checkout selected"), hint("Esc", "stop editing")))
+	} else {
+		b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("/", "edit search"), hint("Enter", "checkout selected"), hint("i", "info"), hint("Esc", "back")))
+	}
+	return b.String()
+}
+
+// checkoutRevisionDetail renders the panel below the list: the full message of
+// the highlighted revision and the files it changed, so Enter is never pressed
+// blind. It is left out when the terminal is too short to hold it.
+func (m Model) checkoutRevisionDetail(rev model.CheckoutRevision, width int) string {
+	height := m.checkoutRevisionDetailHeight()
+	if height <= 0 {
+		return ""
+	}
+
+	var c strings.Builder
+	c.WriteString(mutedStyle.Render("─────────────────────────") + "\n")
+
+	meta := fmt.Sprintf("r%d", rev.Revision)
+	if rev.Author != "" {
+		meta += "  ·  " + rev.Author
+	}
+	if rev.Date != "" {
+		meta += "  ·  " + rev.Date
+	}
+	c.WriteString(labelYellowStyle.Render(truncateVisual(meta, width)) + "\n")
+
+	message := rev.Msg
+	if message == "" {
+		message = "(no commit message)"
+	}
+	c.WriteString(textStyle.Render(truncateVisual(message, width)) + "\n")
+
+	if len(rev.Paths) == 0 {
+		c.WriteString(mutedStyle.Render("No changed paths in the log for this revision.") + "\n")
+		return c.String()
+	}
+
+	c.WriteString(mutedStyle.Render(fmt.Sprintf("Changed files (%d):", len(rev.Paths))) + "\n")
+	// One line of the panel is kept back for the "and N more" note whenever the
+	// revision touched more files than fit.
+	room := max(1, height-4)
+	shown := len(rev.Paths)
+	if shown > room {
+		shown = max(1, room-1)
+	}
+	for _, p := range rev.Paths[:shown] {
+		action := p.Action
+		if action == "" {
+			action = "?"
+		}
+		c.WriteString("  " + statusStyleForPathAction(action).Render(action) + " " +
+			valueWhiteStyle.Render(truncateVisual(p.Path, max(4, width-4))) + "\n")
+	}
+	if shown < len(rev.Paths) {
+		c.WriteString(mutedStyle.Render(fmt.Sprintf("  … and %d more", len(rev.Paths)-shown)) + "\n")
+	}
+	return c.String()
 }
 
 func (m Model) viewFileHistorySearch() string {
@@ -1339,11 +1475,11 @@ func propertyValuePreview(value string, limit int) []string {
 
 func (m Model) viewPropertyNameInput() string {
 	var b strings.Builder
-	b.WriteString(m.compactHeader("Add property to " + m.propertyTarget))
+	b.WriteString(m.compactHeader("Own property for " + m.propertyTarget))
 	var c strings.Builder
 	c.WriteString(textStyle.Render("Property name:") + "\n")
 	c.WriteString(m.input.View() + "\n\n")
-	c.WriteString(mutedStyle.Render("Common ones: svn:ignore, svn:mergeinfo, svn:eol-style, svn:executable, svn:mime-type."))
+	c.WriteString(mutedStyle.Render("For a name of your own — the properties SVN documents are in the picker Esc goes back to."))
 	b.WriteString(m.listBox(c.String()))
 	b.WriteString(statusBar(hint("Enter", "next: value"), hint("i", "info"), hint("Esc", "back")))
 	return b.String()
