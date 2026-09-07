@@ -46,6 +46,11 @@ Supported behavior:
 - commit selected files with a message
 - automatically runs `svn add` for selected unversioned files
 
+An unversioned directory (for example `? add path/to/new-directory`) expands
+into an indented tree on the commit screen. Its files remain part of the
+directory's single selection, but each file can be highlighted and opened with
+`d` to preview its added-file diff.
+
 ### Partial hunk commit
 
 For modified versioned files, the commit screen supports partial commits:
@@ -97,6 +102,18 @@ For large branch lists, you do not need to scroll through the entire branch swam
 - use arrows or `j/k` to move normally
 - type the branch number and press `Enter`
 - use `Backspace` to edit the typed number
+
+### Merge branch revisions
+
+After choosing a branch, the merge action shows its commits with revision,
+author, date, and commit message. The first row is a separate action for the
+latest branch state:
+
+- choose a commit to merge only that revision (`svn merge -c REV`)
+- choose **Merge latest branch state through HEAD** to merge the whole branch
+
+The merge changes the working copy only. Review the result and commit it in a
+separate step.
 
 ### Branch diff
 
@@ -433,7 +450,7 @@ SVN_TUI_REPOS="/home/user/dev/:/home/user/dev/another-project" svn-tui
 
 | Key | Action |
 | --- | --- |
-| `Space` | Select/unselect file |
+| `Space` | Select/unselect file or the parent of an expanded directory file |
 | `a` | Select all files |
 | `n` | Select none |
 | `d` | View side-by-side diff |
@@ -457,6 +474,15 @@ SVN_TUI_REPOS="/home/user/dev/:/home/user/dev/another-project" svn-tui
 | number keys | Type branch number |
 | `Backspace` | Edit typed branch number |
 | `Enter` | Switch to highlighted branch or typed branch number |
+
+### Branch merge revision screen
+
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` or `j` / `k` | Choose the latest-state action or a commit |
+| `Enter` on a commit | Merge only that branch revision |
+| `Enter` on the latest-state action | Merge all branch revisions through `HEAD` |
+| `Esc` | Go back to the branch list |
 
 ### Delete branch confirmation screen
 

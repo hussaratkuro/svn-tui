@@ -57,6 +57,10 @@ func buildSideBySideDiff(r model.Repo, item model.CommitItem, width int) (string
 			return "", err
 		}
 	}
+	if isBinaryContent([]byte(oldText)) || isBinaryContent([]byte(newText)) {
+		return "Path: " + item.Path + "\nStatus: " + item.Status + "\n\n" +
+			warningStyle.Render("Binary file — no side-by-side text diff."), nil
+	}
 
 	oldEOL := detectEOLStyle(oldText)
 	newEOL := detectEOLStyle(newText)
@@ -103,7 +107,6 @@ func renderSideBySideBody(oldText, newText, oldLabel, newLabel string, width int
 	if width <= 0 {
 		width = 160
 	}
-	usableWidth := max(72, width)
 	separatorWidth := lipgloss.Width(" │ Δ │ ")
 
 	oldLines, oldCRLF := splitLinesWithCRLF(oldText)
@@ -118,12 +121,16 @@ func renderSideBySideBody(oldText, newText, oldLabel, newLabel string, width int
 		numWidth = 1
 	}
 	numColOverhead := 2 * (numWidth + lipgloss.Width(" │ "))
+	// Keep the table exactly within the viewport. The previous 72-column
+	// minimum made terminals narrower than that wrap every rendered row and
+	// visually split the two columns apart.
+	// At extremely narrow widths the badge is shortened/omitted before the
+	// table is allowed to overflow the viewport.
+	minimumWidth := separatorWidth + numColOverhead + 2
+	usableWidth := max(minimumWidth, width)
 	cellSpace := usableWidth - separatorWidth - numColOverhead
-	if cellSpace < 48 {
-		cellSpace = 48
-	}
-	leftWidth := max(24, cellSpace/2)
-	rightWidth := max(24, cellSpace-leftWidth)
+	leftWidth := cellSpace / 2
+	rightWidth := cellSpace - leftWidth
 
 	var b strings.Builder
 	b.WriteString(renderDiffHeader(leftWidth, rightWidth, numWidth, oldLabel, newLabel))
@@ -136,8 +143,11 @@ func renderSideBySideBody(oldText, newText, oldLabel, newLabel string, width int
 
 	rows = compactUnchangedRows(rows, 4)
 	for _, row := range rows {
-		leftWrapped := wrapLineForDiff(row.Left, leftWidth)
-		rightWrapped := wrapLineForDiff(row.Right, rightWidth)
+		// Every cell reserves the same fixed suffix for its EOL badge. Wrapping
+		// at that actual content width prevents CRLF rows from losing their last
+		// three characters and keeps LF/CRLF columns identical in width.
+		leftWrapped := wrapLineForDiff(row.Left, diffCellContentWidth(leftWidth))
+		rightWrapped := wrapLineForDiff(row.Right, diffCellContentWidth(rightWidth))
 
 		maxParts := max(len(leftWrapped), len(rightWrapped))
 		for i := range maxParts {
@@ -186,12 +196,13 @@ func renderDiffLine(left, right, marker string, leftWidth, rightWidth, leftNum, 
 	style := diffStyleForMarker(marker)
 
 	buildCell := func(text string, width int, hasCR bool) string {
+		contentWidth := diffCellContentWidth(width)
+		content := style.Render(padRightVisual(text, contentWidth))
+		badge := strings.Repeat(" ", width-contentWidth)
 		if hasCR {
-			cw := max(1, width-crBadgeW)
-			content := style.Render(padRightVisual(truncateVisual(text, cw), cw))
-			return content + labelMauveStyle.Render(" CR")
+			badge = padRightVisual(" CR", width-contentWidth)
 		}
-		return style.Render(padRightVisual(text, width))
+		return content + labelMauveStyle.Render(badge)
 	}
 
 	leftCell := buildCell(left, leftWidth, leftCRLF)
@@ -212,6 +223,10 @@ func renderDiffLine(left, right, marker string, leftWidth, rightWidth, leftNum, 
 
 	numSep := mutedStyle.Render(" │ ")
 	return mutedStyle.Render(leftNumStr) + numSep + leftCell + mutedStyle.Render(" │ ") + markerCell + mutedStyle.Render(" │ ") + mutedStyle.Render(rightNumStr) + numSep + rightCell
+}
+
+func diffCellContentWidth(cellWidth int) int {
+	return max(1, cellWidth-crBadgeW)
 }
 
 func diffStyleForMarker(marker string) lipgloss.Style {
@@ -484,9 +499,9 @@ func detectEOLStyle(text string) string {
 	}
 }
 
-// hasFinalNewline reports whether text ends with a newline (LF or CRLF).
+// hasFinalNewline reports whether text ends with LF, CRLF, or a lone CR.
 func hasFinalNewline(text string) bool {
-	return strings.HasSuffix(text, "\n") || strings.HasSuffix(text, "\r\n")
+	return strings.HasSuffix(text, "\n") || strings.HasSuffix(text, "\r")
 }
 
 // buildEOLNote returns a styled one-line summary of EOL/EOF differences.

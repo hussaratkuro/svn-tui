@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -49,6 +50,10 @@ type Model struct {
 	branchNumberInput string
 	branchFilter      string
 	branchFilterMode  bool
+	mergeBranch       model.Branch
+	mergeRevisions    []model.BranchMergeRevision
+	mergeCursor       int
+	mergeOffset       int
 
 	shelves        []string
 	shelfCursor    int
@@ -187,6 +192,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.branchOffset = adjustOffset(0, m.branchCursor, m.branchListVisibleCount())
 		}
 		m.screen = model.ScreenBranchSelect
+		return m, nil
+
+	case model.BranchMergeRevisionsLoadedMsg:
+		if msg.Err != nil {
+			content := "Failed to load branch revisions."
+			if strings.TrimSpace(msg.Output) != "" {
+				content += "\n\n" + msg.Output
+			}
+			content += "\n\n" + msg.Err.Error()
+			return m.showErrorContent("Failed to load branch revisions.", content), nil
+		}
+		m.mergeBranch = msg.Branch
+		m.mergeRevisions = msg.Revisions
+		m.mergeCursor, m.mergeOffset = 0, 0
+		m.screen = model.ScreenBranchMergeSelect
 		return m, nil
 
 	case model.BranchDeleteInfoLoadedMsg:
@@ -518,6 +538,11 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m.branchCursor = clamp(m.branchCursor+steps, 0, max(0, len(filtered)-1))
 		m.branchOffset = adjustOffset(m.branchOffset, m.branchCursor, m.branchListVisibleCount())
 
+	case model.ScreenBranchMergeSelect:
+		total := len(m.mergeRevisions) + 1
+		m.mergeCursor = clamp(m.mergeCursor+steps, 0, max(0, total-1))
+		m.mergeOffset = adjustOffset(m.mergeOffset, m.mergeCursor, m.branchMergeListVisibleCount())
+
 	case model.ScreenBranchDiffSelect:
 		m.branchDiffCursor = clamp(m.branchDiffCursor+steps, 0, max(0, len(m.branchDiffItems)-1))
 		m.branchDiffOffset = adjustOffset(m.branchDiffOffset, m.branchDiffCursor, m.branchDiffListVisibleCount())
@@ -633,6 +658,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case model.ScreenBranchDiffSelect:
 			m.screen = model.ScreenBranchSelect
+		case model.ScreenBranchMergeSelect:
+			m.screen = model.ScreenBranchSelect
 		case model.ScreenDeleteBranchConfirm:
 			m.input.Reset()
 			m.screen = model.ScreenBranchSelect
@@ -682,6 +709,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updatePropertyValueInput(msg)
 	case model.ScreenBranchSelect:
 		return m.updateBranchSelect(msg)
+	case model.ScreenBranchMergeSelect:
+		return m.updateBranchMergeSelect(msg)
 	case model.ScreenBranchDiffSelect:
 		return m.updateBranchDiffSelect(msg)
 	case model.ScreenDeleteBranchConfirm:
@@ -1050,6 +1079,26 @@ func (m Model) updateFileHistorySearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m Model) updateBranchMergeSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	total := len(m.mergeRevisions) + 1 // the first row is the merge-through-HEAD action
+	visible := m.branchMergeListVisibleCount()
+	m.mergeCursor = navigateCursor(m.mergeCursor, total, visible, msg.String())
+
+	if msg.String() == "enter" {
+		revision := ""
+		m.runningTitle = "Merging branch through HEAD..."
+		if m.mergeCursor > 0 {
+			revision = strconv.Itoa(m.mergeRevisions[m.mergeCursor-1].Revision)
+			m.runningTitle = "Merging branch revision r" + revision + "..."
+		}
+		m.screen = model.ScreenRunning
+		return m, mergeBranchCmd(m.activeRepo, m.mergeBranch.Name, revision)
+	}
+
+	m.mergeOffset = adjustOffset(m.mergeOffset, m.mergeCursor, visible)
+	return m, nil
+}
+
 func (m Model) updateFileHistorySelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	visible := m.visibleListCount(12)
 	m.fileHistoryCursor = navigateCursor(m.fileHistoryCursor, len(m.fileHistoryItems), visible, msg.String())
@@ -1165,8 +1214,9 @@ func (m Model) updateBranchSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) startBranchAction(selected model.Branch) (tea.Model, tea.Cmd) {
 	switch m.selectedAction {
 	case model.ActionMergeBranch:
-		m.screen, m.runningTitle = model.ScreenRunning, "Merging branch..."
-		return m, mergeBranchCmd(m.activeRepo, selected.Name)
+		m.mergeBranch = selected
+		m.screen, m.runningTitle = model.ScreenRunning, "Loading branch revisions..."
+		return m, loadBranchMergeRevisionsCmd(m.activeRepo, selected)
 	case model.ActionBranchDiffFromStart:
 		m.screen, m.runningTitle = model.ScreenRunning, "Comparing branch with its branch point..."
 		return m, loadBranchDiffCmd(m.activeRepo, selected.Name, model.BranchDiffSinceBranchPoint)
@@ -1216,7 +1266,7 @@ func (m Model) updateBranchDiffSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		m.screen, m.runningTitle = model.ScreenRunning, "Loading side-by-side diff..."
-		return m, branchFileDiffCmd(m.activeRepo, m.branchDiffCtx, m.branchDiffItems[m.branchDiffCursor], m.width-4)
+		return m, branchFileDiffCmd(m.activeRepo, m.branchDiffCtx, m.branchDiffItems[m.branchDiffCursor], m.diffViewportWidth())
 	case "u":
 		m.screen, m.runningTitle = model.ScreenRunning, "Loading full unified diff..."
 		return m, branchFullDiffCmd(m.activeRepo, m.branchDiffCtx)
@@ -1399,20 +1449,23 @@ func (m Model) updateCommitSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case " ":
 		if len(m.commitItems) > 0 {
-			m.commitItems[m.commitCursor].Selected = !m.commitItems[m.commitCursor].Selected
+			root := commitSelectionRootIndex(m.commitItems, m.commitCursor)
+			setCommitSelection(m.commitItems, root, !m.commitItems[root].Selected)
 		}
 	case "a":
 		for i := range m.commitItems {
-			m.commitItems[i].Selected = true
+			if m.commitItems[i].IncludedByParent == "" {
+				setCommitSelection(m.commitItems, i, true)
+			}
 		}
 	case "n":
 		for i := range m.commitItems {
 			m.commitItems[i].Selected = false
 		}
 	case "d":
-		if len(m.commitItems) > 0 {
+		if len(m.commitItems) > 0 && !m.commitItems[m.commitCursor].IsDir {
 			m.screen, m.runningTitle = model.ScreenRunning, "Loading side-by-side diff..."
-			return m, diffCmd(m.activeRepo, m.commitItems[m.commitCursor], m.width-4)
+			return m, diffCmd(m.activeRepo, m.commitItems[m.commitCursor], m.diffViewportWidth())
 		}
 	case "p":
 		if len(m.commitItems) == 0 {
@@ -1432,7 +1485,18 @@ func (m Model) updateCommitSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.commitItems) == 0 {
 			break
 		}
-		m.commitItems = append(m.commitItems[:m.commitCursor], m.commitItems[m.commitCursor+1:]...)
+		if m.commitItems[m.commitCursor].IncludedByParent != "" {
+			break
+		}
+		hiddenPath := m.commitItems[m.commitCursor].Path
+		kept := m.commitItems[:0:0]
+		for _, item := range m.commitItems {
+			if item.Path == hiddenPath || item.IncludedByParent == hiddenPath {
+				continue
+			}
+			kept = append(kept, item)
+		}
+		m.commitItems = kept
 		if m.commitCursor >= len(m.commitItems) {
 			m.commitCursor = max(0, len(m.commitItems)-1)
 		}
@@ -1527,7 +1591,7 @@ func (m Model) updateShelveSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.showError("This file is unversioned, so SVN has no base version to compare against.", "diff is not available for unversioned files"), nil
 		}
 		m.screen, m.runningTitle = model.ScreenRunning, "Loading side-by-side diff..."
-		return m, diffCmd(m.activeRepo, item, m.width-4)
+		return m, diffCmd(m.activeRepo, item, m.diffViewportWidth())
 	case "enter":
 		items := selectedCommitItems(m.commitItems)
 		if len(items) == 0 {
@@ -1561,7 +1625,7 @@ func (m Model) updateRevertSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "d":
 		if len(m.commitItems) > 0 {
 			m.screen, m.runningTitle = model.ScreenRunning, "Loading side-by-side diff..."
-			return m, diffCmd(m.activeRepo, m.commitItems[m.commitCursor], m.width-4)
+			return m, diffCmd(m.activeRepo, m.commitItems[m.commitCursor], m.diffViewportWidth())
 		}
 	case "enter":
 		selected := selectedCommitItems(m.commitItems)
@@ -1824,8 +1888,16 @@ func (m Model) branchListVisibleCount() int {
 	return m.visibleListCount(14)
 }
 
+func (m Model) branchMergeListVisibleCount() int {
+	return max(2, (m.listInnerHeight()-5)/2)
+}
+
 func (m Model) branchDiffListVisibleCount() int {
 	return m.visibleListCount(15)
+}
+
+func (m Model) diffViewportWidth() int {
+	return max(20, m.width-4)
 }
 
 func (m Model) pullListVisibleCount() int {

@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"path"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -28,6 +29,8 @@ func (m Model) View() string {
 		return m.viewFileHistorySelect()
 	case model.ScreenBranchSelect:
 		return m.viewBranchSelect()
+	case model.ScreenBranchMergeSelect:
+		return m.viewBranchMergeSelect()
 	case model.ScreenBranchDiffSelect:
 		return m.viewBranchDiffSelect()
 	case model.ScreenDeleteBranchConfirm:
@@ -270,7 +273,7 @@ func (m Model) viewBranchSelect() string {
 	switch m.selectedAction {
 	case model.ActionMergeBranch:
 		title = "Merge branch"
-		enterAction = "merge"
+		enterAction = "choose revision"
 	case model.ActionBranchDiffFromStart:
 		title = "Branch diff since branch point"
 		enterAction = "compare"
@@ -324,6 +327,68 @@ func (m Model) viewBranchSelect() string {
 	} else {
 		b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("/", "search"), hint("0-9", "jump to number"), hint("Enter", enterAction), hint("Esc", "back")))
 	}
+	return b.String()
+}
+
+func (m Model) viewBranchMergeSelect() string {
+	var b strings.Builder
+	b.WriteString(m.compactHeader("Merge branch revision"))
+
+	total := len(m.mergeRevisions) + 1
+	visible := m.branchMergeListVisibleCount()
+	end := min(total, m.mergeOffset+visible)
+	lineWidth := max(20, m.width-8)
+
+	var c strings.Builder
+	c.WriteString(mutedStyle.Render("Source branch: ") + labelYellowStyle.Render(m.mergeBranch.Name) + "\n")
+	c.WriteString(mutedStyle.Render("Choose the latest branch state or one commit:") + "\n")
+	c.WriteString(mutedStyle.Render("─────────────────────────") + "\n")
+
+	for i := m.mergeOffset; i < end; i++ {
+		cursor := "  "
+		if i == m.mergeCursor {
+			cursor = "> "
+		}
+
+		if i == 0 {
+			title := cursor + "[ Merge latest branch state through HEAD ]"
+			detail := "    Apply every unmerged branch revision."
+			if i == m.mergeCursor {
+				c.WriteString(selectedStyle.Render(truncateVisual(title, lineWidth)) + "\n")
+				c.WriteString(selectedStyle.Render(truncateVisual(detail, lineWidth)) + "\n")
+			} else {
+				c.WriteString(actionStyle.Render(truncateVisual(title, lineWidth)) + "\n")
+				c.WriteString(mutedStyle.Render(truncateVisual(detail, lineWidth)) + "\n")
+			}
+			continue
+		}
+
+		revision := m.mergeRevisions[i-1]
+		meta := fmt.Sprintf("%sr%d", cursor, revision.Revision)
+		if revision.Author != "" {
+			meta += "  " + revision.Author
+		}
+		if revision.Date != "" {
+			meta += "  " + revision.Date
+		}
+		message := revision.Msg
+		if message == "" {
+			message = "(no commit message)"
+		}
+		message = "    " + message
+		if i == m.mergeCursor {
+			c.WriteString(selectedStyle.Render(truncateVisual(meta, lineWidth)) + "\n")
+			c.WriteString(selectedStyle.Render(truncateVisual(message, lineWidth)) + "\n")
+		} else {
+			c.WriteString(labelSapphireStyle.Render(truncateVisual(meta, lineWidth)) + "\n")
+			c.WriteString(normalStyle.Render(truncateVisual(message, lineWidth)) + "\n")
+		}
+	}
+	c.WriteString("\n")
+	c.WriteString(mutedStyle.Render(scrollHint(m.mergeOffset, end, total)))
+
+	b.WriteString(m.listBox(c.String()))
+	b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("Enter", "merge selected"), hint("i", "info"), hint("Esc", "branches")))
 	return b.String()
 }
 
@@ -604,7 +669,7 @@ func (m Model) viewCommitSelect() string {
 	end := min(len(m.commitItems), m.commitOffset+items)
 
 	var c strings.Builder
-	c.WriteString(mutedStyle.Render(fmt.Sprintf("Selected files: %d | Unversioned (will be svn add-ed): %d", selectedCount, unversionedCount)) + "\n")
+	c.WriteString(mutedStyle.Render(fmt.Sprintf("Selected items: %d | Unversioned (will be svn add-ed): %d", selectedCount, unversionedCount)) + "\n")
 	if n := len(m.commitConflicts); n > 0 {
 		c.WriteString(warningStyle.Render(fmt.Sprintf("%d path(s) left out: still in conflict, SVN refuses to commit them — see Resolve conflicts", n)) + "\n")
 		for _, p := range m.commitConflicts {
@@ -626,7 +691,7 @@ func (m Model) viewCommitSelect() string {
 		}
 		armed := m.deleteConfirmIdx == i
 		status := item.Status
-		path := commitItemLabel(item)
+		path := commitTreeItemLabel(item)
 		if item.Unversioned {
 			if armed {
 				status = "? DEL!"
@@ -662,7 +727,7 @@ func (m Model) viewCommitSelect() string {
 	if m.deleteConfirmIdx >= 0 {
 		b.WriteString("\n" + warningStyle.Render("Del again: confirm permanent deletion — or move cursor to cancel"))
 	} else {
-		hints := []string{hint("Space", "select"), hint("a", "all"), hint("n", "none"), hint("h", "hide"), hint("d", "diff"), hint("p", "partial hunks"), hint("Enter", "commit message"), hint("i", "info"), hint("Esc", "back")}
+		hints := []string{hint("Space", "select/dir"), hint("a", "all"), hint("n", "none"), hint("h", "hide root"), hint("d", "file diff"), hint("p", "partial hunks"), hint("Enter", "commit message"), hint("i", "info"), hint("Esc", "back")}
 		canDelete := func(ci model.CommitItem) bool {
 			return ci.Unversioned || (len(ci.Status) > 0 && ci.Status[0] == 'A')
 		}
@@ -1138,6 +1203,21 @@ func commitItemLabel(item model.CommitItem) string {
 		label += "  (properties only, e.g. merge info)"
 	}
 	return label
+}
+
+// commitTreeItemLabel renders descendants of an unversioned directory like a
+// nested HTML list while keeping item.Path untouched for SVN and diff commands.
+func commitTreeItemLabel(item model.CommitItem) string {
+	if item.IncludedByParent == "" {
+		return commitItemLabel(item)
+	}
+	rel := strings.TrimPrefix(item.Path, strings.TrimSuffix(item.IncludedByParent, "/")+"/")
+	depth := strings.Count(rel, "/") + 1
+	name := path.Base(item.Path)
+	if item.IsDir {
+		name += "/"
+	}
+	return strings.Repeat("  ", depth) + "• " + name
 }
 
 // ── Properties ────────────────────────────────────────────────────────────────

@@ -257,7 +257,72 @@ func deleteBranchCmd(r model.Repo, branchName string) tea.Cmd {
 	})
 }
 
-func mergeBranchCmd(r model.Repo, branchName string) tea.Cmd {
+func loadBranchMergeRevisionsCmd(r model.Repo, branch model.Branch) tea.Cmd {
+	return func() tea.Msg {
+		branchURL := r.Root + "/branches/" + branch.Name
+		out, err := svn.Run(r, "log", "--xml", "--stop-on-copy", branchURL)
+		if err != nil {
+			return model.BranchMergeRevisionsLoadedMsg{
+				Branch: branch,
+				Output: out,
+				Err:    fmt.Errorf("svn log failed\n\nBranch URL: %s\n\nError: %w", branchURL, err),
+			}
+		}
+
+		var parsed model.SVNLogXML
+		if err := xml.Unmarshal([]byte(out), &parsed); err != nil {
+			return model.BranchMergeRevisionsLoadedMsg{
+				Branch: branch,
+				Output: out,
+				Err:    fmt.Errorf("could not parse branch log: %w", err),
+			}
+		}
+		if len(parsed.Entries) == 0 {
+			return model.BranchMergeRevisionsLoadedMsg{
+				Branch: branch,
+				Output: out,
+				Err:    fmt.Errorf("no SVN log entries found for branch %s", branch.Name),
+			}
+		}
+
+		return model.BranchMergeRevisionsLoadedMsg{
+			Branch:    branch,
+			Revisions: branchMergeRevisionsFromLog(parsed.Entries),
+		}
+	}
+}
+
+// branchMergeRevisionsFromLog turns the branch log into newest-first picker
+// rows. The oldest entry is the branch creation itself; cherry-picking that
+// revision would try to merge the creation of the branch rather than a commit
+// made on it, so it is deliberately not offered.
+func branchMergeRevisionsFromLog(entries []model.SVNLogEntryXML) []model.BranchMergeRevision {
+	creationRevision := 0
+	for _, entry := range entries {
+		if entry.Revision > 0 && (creationRevision == 0 || entry.Revision < creationRevision) {
+			creationRevision = entry.Revision
+		}
+	}
+
+	revisions := make([]model.BranchMergeRevision, 0, max(0, len(entries)-1))
+	for _, entry := range entries {
+		if entry.Revision <= 0 || entry.Revision == creationRevision {
+			continue
+		}
+		revisions = append(revisions, model.BranchMergeRevision{
+			Revision: entry.Revision,
+			Author:   strings.TrimSpace(entry.Author),
+			Date:     formatSVNLogDate(entry.Date),
+			Msg:      compactOneLine(entry.Msg),
+		})
+	}
+	sort.SliceStable(revisions, func(i, j int) bool {
+		return revisions[i].Revision > revisions[j].Revision
+	})
+	return revisions
+}
+
+func mergeBranchCmd(r model.Repo, branchName, revision string) tea.Cmd {
 	return startStreamingCommand(func(emit func(string)) model.CommandResult {
 		branchURL := r.Root + "/branches/" + branchName
 		var output strings.Builder
@@ -284,6 +349,19 @@ func mergeBranchCmd(r model.Repo, branchName string) tea.Cmd {
 			line("")
 		}
 
+		if revision != "" {
+			line("Merge mode: single branch revision")
+			line("Revision: r" + revision)
+			line("")
+
+			err := streamSVN(branchMergeArgs(branchURL, revision, 0)...)
+			if err == nil {
+				line("")
+				line("Revision r" + revision + " from branch " + branchName + " merged successfully. Review changes, then commit.")
+			}
+			return model.CommandResult{Output: output.String(), Err: err, CurrentLocation: svn.GetCurrentLocation(r), URL: svn.GetCurrentURL(r)}
+		}
+
 		startRev, revOut, revErr := branchStartRevision(r, branchURL)
 		if strings.TrimSpace(revOut) != "" {
 			for _, l := range strings.Split(strings.TrimRight(revOut, "\n"), "\n") {
@@ -307,13 +385,20 @@ func mergeBranchCmd(r model.Repo, branchName string) tea.Cmd {
 		line("Revision range: " + revisionRange)
 		line("")
 
-		err := streamSVN("merge", "-r", revisionRange, branchURL+"@HEAD", ".")
+		err := streamSVN(branchMergeArgs(branchURL, "", startRev)...)
 		if err == nil {
 			line("")
 			line("Branch " + branchName + " merged successfully. Review changes, then commit.")
 		}
 		return model.CommandResult{Output: output.String(), Err: err, CurrentLocation: svn.GetCurrentLocation(r), URL: svn.GetCurrentURL(r)}
 	})
+}
+
+func branchMergeArgs(branchURL, revision string, startRev int) []string {
+	if revision != "" {
+		return []string{"merge", "-c", revision, branchURL + "@HEAD", "."}
+	}
+	return []string{"merge", "-r", fmt.Sprintf("%d:HEAD", startRev), branchURL + "@HEAD", "."}
 }
 
 func branchStartRevision(r model.Repo, branchURL string) (int, string, error) {
@@ -761,6 +846,10 @@ func loadCommitItemsCmd(r model.Repo) tea.Cmd {
 			}
 			committable = append(committable, item)
 		}
+		committable, err = expandUnversionedCommitDirectories(r, committable)
+		if err != nil {
+			return model.CommitItemsLoadedMsg{Err: err}
+		}
 		return model.CommitItemsLoadedMsg{Items: committable, Conflicted: conflicted}
 	}
 }
@@ -928,6 +1017,68 @@ func filterSelectFilesOnly(r model.Repo, items []model.CommitItem, hiddenPaths [
 		filtered = append(filtered, item)
 	}
 	return filtered
+}
+
+// expandUnversionedCommitDirectories adds display-only rows for every visible
+// descendant of an unversioned directory. SVN status only reports the top-level
+// "?" directory, even though svn add will recurse into it. Keeping the parent
+// as the selection unit preserves commit semantics while allowing each file to
+// be highlighted and diffed from the commit screen.
+func expandUnversionedCommitDirectories(r model.Repo, items []model.CommitItem) ([]model.CommitItem, error) {
+	expanded := append([]model.CommitItem(nil), items...)
+	known := make(map[string]bool, len(items))
+	for _, item := range items {
+		known[item.Path] = true
+	}
+
+	for _, parent := range items {
+		if !parent.Unversioned || !parent.IsDir || parent.IncludedByParent != "" {
+			continue
+		}
+		fullRoot := filepath.Join(r.Path, filepath.FromSlash(parent.Path))
+		err := filepath.WalkDir(fullRoot, func(path string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if path == fullRoot {
+				return nil
+			}
+			rel, err := filepath.Rel(r.Path, path)
+			if err != nil {
+				return err
+			}
+			rel = filepath.ToSlash(rel)
+			if shouldHideFromCommitSelect(rel) {
+				if entry.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if known[rel] {
+				return nil
+			}
+			known[rel] = true
+			expanded = append(expanded, model.CommitItem{
+				Status:           "?",
+				Path:             rel,
+				Unversioned:      true,
+				IsDir:            entry.IsDir(),
+				IncludedByParent: parent.Path,
+			})
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("could not list files below unversioned directory %s: %w", parent.Path, err)
+		}
+	}
+
+	sort.SliceStable(expanded, func(i, j int) bool {
+		if expanded[i].Unversioned != expanded[j].Unversioned {
+			return !expanded[i].Unversioned && expanded[j].Unversioned
+		}
+		return expanded[i].Path < expanded[j].Path
+	})
+	return expanded, nil
 }
 
 // dirChangesAllIgnored reports whether every change SVN sees under dir is one
@@ -2006,7 +2157,7 @@ func partialHunkCommitCmd(r model.Repo, item model.CommitItem, hunks []model.Par
 func selectedCommitItems(items []model.CommitItem) []model.CommitItem {
 	var out []model.CommitItem
 	for _, item := range items {
-		if item.Selected {
+		if item.Selected && item.IncludedByParent == "" {
 			out = append(out, item)
 		}
 	}
@@ -2016,7 +2167,7 @@ func selectedCommitItems(items []model.CommitItem) []model.CommitItem {
 func selectedCommitPaths(items []model.CommitItem) []string {
 	var out []string
 	for _, item := range items {
-		if item.Selected {
+		if item.Selected && item.IncludedByParent == "" {
 			out = append(out, item.Path)
 		}
 	}
@@ -2026,11 +2177,39 @@ func selectedCommitPaths(items []model.CommitItem) []string {
 func selectedUnversionedCommitPaths(items []model.CommitItem) []string {
 	var out []string
 	for _, item := range items {
-		if item.Selected && item.Unversioned {
+		if item.Selected && item.Unversioned && item.IncludedByParent == "" {
 			out = append(out, item.Path)
 		}
 	}
 	return out
+}
+
+// commitSelectionRootIndex maps a nested preview row back to the unversioned
+// directory which will actually be added and committed.
+func commitSelectionRootIndex(items []model.CommitItem, index int) int {
+	if index < 0 || index >= len(items) || items[index].IncludedByParent == "" {
+		return index
+	}
+	for i := range items {
+		if items[i].Path == items[index].IncludedByParent && items[i].IncludedByParent == "" {
+			return i
+		}
+	}
+	return index
+}
+
+func setCommitSelection(items []model.CommitItem, index int, selected bool) {
+	root := commitSelectionRootIndex(items, index)
+	if root < 0 || root >= len(items) {
+		return
+	}
+	items[root].Selected = selected
+	rootPath := items[root].Path
+	for i := range items {
+		if items[i].IncludedByParent == rootPath {
+			items[i].Selected = selected
+		}
+	}
 }
 
 func commitItemPaths(items []model.CommitItem) []string {

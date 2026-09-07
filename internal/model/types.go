@@ -14,6 +14,7 @@ const (
 	ScreenCreateBranchInput
 	ScreenCheckoutRevisionInput
 	ScreenBranchSelect
+	ScreenBranchMergeSelect
 	ScreenBranchDiffSelect
 	ScreenDeleteBranchConfirm
 	ScreenShelfSelect
@@ -89,6 +90,20 @@ type Repo struct {
 type Branch struct {
 	Name     string
 	Revision int
+}
+
+type BranchMergeRevision struct {
+	Revision int
+	Author   string
+	Date     string
+	Msg      string
+}
+
+type BranchMergeRevisionsLoadedMsg struct {
+	Branch    Branch
+	Revisions []BranchMergeRevision
+	Output    string
+	Err       error
 }
 
 // BranchDeleteInfo is what the delete confirmation shows about a branch, so the
@@ -191,6 +206,10 @@ type CommitItem struct {
 	PropsChanged bool
 	Conflicted   bool
 	IsDir        bool
+	// IncludedByParent marks a display row below an unversioned directory.
+	// SVN adds that directory recursively, so these descendants are previewable
+	// but belong to the parent's single commit selection.
+	IncludedByParent string
 }
 
 type ConflictItem struct {
