@@ -248,7 +248,10 @@ type historyBlock struct {
 	revision  int
 }
 
-var historyRevisionLineRe = regexp.MustCompile(`^r(\d+)\s*\|`)
+var (
+	historyRevisionLineRe = regexp.MustCompile(`^r(\d+)\s*\|`)
+	ansiEscapeRe          = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+)
 
 // parseHistoryBlocks splits rendered `svn log` content into per-commit blocks,
 // delimited by the "----" separator lines svn prints between entries.
@@ -348,7 +351,7 @@ func indexOfInt(s []int, v int) (int, bool) {
 }
 
 func stripANSI(s string) string {
-	return regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(s, "")
+	return ansiEscapeRe.ReplaceAllString(s, "")
 }
 
 func formatSVNLogDate(s string) string {

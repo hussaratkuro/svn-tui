@@ -141,7 +141,6 @@ func renderSideBySideBody(oldText, newText, oldLabel, newLabel string, width int
 		return b.String()
 	}
 
-	rows = compactUnchangedRows(rows, 4)
 	for _, row := range rows {
 		// Every cell reserves the same fixed suffix for its EOL badge. Wrapping
 		// at that actual content width prevents CRLF rows from losing their last
@@ -313,45 +312,7 @@ func sideBySideRows(oldLines, newLines []string, oldCRLF, newCRLF []bool) []mode
 		rows = append(rows, model.DiffRow{Right: newLines[j], Marker: "+", RightNum: j + 1, RightCRLF: crlfAt(newCRLF, j)})
 		j++
 	}
-	return compactUnchangedRows(rows, 4)
-}
-
-func compactUnchangedRows(rows []model.DiffRow, context int) []model.DiffRow {
-	if len(rows) == 0 {
-		return rows
-	}
-	changed := make([]bool, len(rows))
-	hasChanges := false
-	for i, row := range rows {
-		if row.Marker != "=" {
-			hasChanges = true
-			from := max(0, i-context)
-			to := min(len(rows)-1, i+context)
-			for j := from; j <= to; j++ {
-				changed[j] = true
-			}
-		}
-	}
-	if !hasChanges {
-		return rows
-	}
-	var out []model.DiffRow
-	hidden := false
-	for i, row := range rows {
-		if changed[i] {
-			if hidden {
-				out = append(out, model.DiffRow{Left: "...", Right: "...", Marker: " "})
-				hidden = false
-			}
-			out = append(out, row)
-		} else {
-			hidden = true
-		}
-	}
-	if hidden {
-		out = append(out, model.DiffRow{Left: "...", Right: "...", Marker: " "})
-	}
-	return out
+	return rows
 }
 
 func wrapLineForDiff(s string, width int) []string {

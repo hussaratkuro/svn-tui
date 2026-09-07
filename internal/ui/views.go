@@ -1077,14 +1077,16 @@ func (m Model) viewDiff() string {
 	b.WriteString(m.compactHeader(title))
 
 	vp := m.viewport
-	vp.Height = max(3, m.listInnerHeight()-1)
+	vp.Width = m.diffViewportWidth()
+	vp.Height = m.diffViewportHeight()
 
 	var c strings.Builder
 	c.WriteString(mutedStyle.Render("Legend: = same | - removed/old | + added/new | ~ changed | CR = CRLF line") + "\n")
-	c.WriteString(vp.View())
+	overview := renderDiffOverview(m.diffLineKinds, vp.Height, vp.YOffset, vp.VisibleLineCount())
+	c.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, vp.View(), " ", overview))
 
 	b.WriteString(m.listBox(c.String()))
-	b.WriteString(statusBar(hint("↑↓", "scroll"), hint("PgUp/PgDn", "page"), hint("Home/End", "jump"), hint("Esc", "back")))
+	b.WriteString(statusBar(hint("↑↓", "scroll"), hint("Alt+↑/↓", "prev/next change"), hint("PgUp/PgDn", "page"), hint("Home/End", "jump"), hint("Esc", "back")))
 	return b.String()
 }
 

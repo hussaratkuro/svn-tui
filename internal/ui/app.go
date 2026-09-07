@@ -101,8 +101,10 @@ type Model struct {
 	conflictOffset int
 	resolveConfirm resolveConfirmKind
 
-	input    textinput.Model
-	viewport viewport.Model
+	input            textinput.Model
+	viewport         viewport.Model
+	diffLineKinds    []diffLineKind
+	diffChangeCursor int
 
 	historyTitle   string
 	historyContent string
@@ -170,6 +172,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.viewport.Width = max(20, msg.Width-4)
 		m.viewport.Height = max(5, msg.Height-6)
+		if m.screen == model.ScreenDiff {
+			m.syncDiffViewportSize()
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -410,13 +415,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case model.DiffLoadedMsg:
 		m.screen = model.ScreenDiff
 		m.err = msg.Err
+		content := msg.Output
 		if msg.Err != nil {
-			m.viewport.SetContent("Failed to load side-by-side diff for:\n" + msg.Path + "\n\n" + msg.Output + "\n\n" + msg.Err.Error())
+			content = "Failed to load side-by-side diff for:\n" + msg.Path + "\n\n" + msg.Output + "\n\n" + msg.Err.Error()
 		} else if strings.TrimSpace(msg.Output) == "" {
-			m.viewport.SetContent("No diff found for:\n" + msg.Path)
-		} else {
-			m.viewport.SetContent(msg.Output)
+			content = "No diff found for:\n" + msg.Path
 		}
+		m.diffLineKinds = classifyDiffLines(content)
+		m.diffChangeCursor = -1
+		m.syncDiffViewportSize()
+		m.viewport.SetContent(content)
 		m.viewport.GotoTop()
 		return m, nil
 
@@ -577,6 +585,10 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case model.ScreenHistory, model.ScreenDiff, model.ScreenResult:
+		if m.screen == model.ScreenDiff {
+			m.diffChangeCursor = -1
+			m.syncDiffViewportSize()
+		}
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		return m, cmd
@@ -594,6 +606,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "i":
 		if m.screen != model.ScreenRepoSelect && !m.inputActive() {
 			m.showInfo = !m.showInfo
+			if m.screen == model.ScreenDiff {
+				m.syncDiffViewportSize()
+			}
 			return m, nil
 		}
 
@@ -751,9 +766,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case model.ScreenHistory:
 		return m.updateHistoryScreen(msg)
 	case model.ScreenDiff:
-		var cmd tea.Cmd
-		m.viewport, cmd = m.viewport.Update(msg)
-		return m, cmd
+		return m.updateDiffScreen(msg)
 	}
 	return m, nil
 }
@@ -791,6 +804,41 @@ func (m Model) updateRunningScroll(msg tea.KeyMsg) Model {
 		m.runningOffset = max(0, total-available)
 	}
 	return m
+}
+
+func (m Model) updateDiffScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.syncDiffViewportSize()
+	direction := 0
+	switch msg.String() {
+	case "alt+down":
+		direction = 1
+	case "alt+up":
+		direction = -1
+	}
+	if direction != 0 {
+		starts := diffChangeStarts(m.diffLineKinds)
+		targetIndex := -1
+		if m.diffChangeCursor >= 0 && m.diffChangeCursor < len(starts) {
+			targetIndex = m.diffChangeCursor + direction
+		} else if offset, ok := nextDiffChange(starts, m.viewport.YOffset, direction); ok {
+			for i, start := range starts {
+				if start == offset {
+					targetIndex = i
+					break
+				}
+			}
+		}
+		if targetIndex >= 0 && targetIndex < len(starts) {
+			m.diffChangeCursor = targetIndex
+			m.viewport.SetYOffset(starts[targetIndex])
+		}
+		return m, nil
+	}
+
+	m.diffChangeCursor = -1
+	var cmd tea.Cmd
+	m.viewport, cmd = m.viewport.Update(msg)
+	return m, cmd
 }
 
 func (m Model) updateHistorySearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1897,7 +1945,18 @@ func (m Model) branchDiffListVisibleCount() int {
 }
 
 func (m Model) diffViewportWidth() int {
-	return max(20, m.width-4)
+	// Two cells are reserved to the right of the content for the gap and the
+	// full-document change overview.
+	return max(20, m.width-6)
+}
+
+func (m Model) diffViewportHeight() int {
+	return max(3, m.listInnerHeight()-1)
+}
+
+func (m *Model) syncDiffViewportSize() {
+	m.viewport.Width = m.diffViewportWidth()
+	m.viewport.Height = m.diffViewportHeight()
 }
 
 func (m Model) pullListVisibleCount() int {

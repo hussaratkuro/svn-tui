@@ -499,6 +499,19 @@ SVN_TUI_REPOS="/home/user/dev/:/home/user/dev/another-project" svn-tui
 | `u` | Full unified diff of the comparison |
 | `Esc` | Back to the branch list |
 
+### Diff viewer
+
+The side-by-side viewer keeps the complete file visible instead of collapsing
+unchanged sections. Its right-hand overview maps the whole file: green marks
+added lines, red marks removed lines, and yellow marks modified lines.
+
+| Key | Action |
+| --- | --- |
+| `Alt` + `↑` | Jump to the previous change |
+| `Alt` + `↓` | Jump to the next change |
+| `↑` / `↓`, `PgUp` / `PgDn`, `Home` / `End` | Scroll normally |
+| `Esc` | Back |
+
 ### Revision tree screen
 
 | Key | Action |
