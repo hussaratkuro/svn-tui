@@ -184,7 +184,8 @@ The UI warns that a later Pull action updates the working copy back to `HEAD`.
 
 Lists conflicts from `svn status`.
 
-- file conflicts are opened with Meld (`Enter`)
+- the companion `merger` TUI is the default file-conflict merge tool (`Enter`)
+- Meld remains available as a fallback with `M`
 - file conflicts can also be resolved whole-file, without Meld:
   - `m` keeps the current file — `svn resolve --accept=mine-full`
   - `t` takes the incoming file — `svn resolve --accept=theirs-full`
@@ -199,7 +200,8 @@ selection for them. `r` resolves every tree conflict in the list, one path at a
 time, and reports each path separately. Press `r` once to arm it, `r` again to
 run it; moving the cursor cancels.
 
-Meld support expects `meld` to be installed and available in `PATH`.
+`merger` must be installed in `PATH` or beside the `svntui` executable. Meld
+fallback support expects `meld` to be installed and available in `PATH`.
 
 ### Cleanup
 
@@ -331,7 +333,8 @@ sudo install -m 755 svn-tui /usr/local/bin/svn-tui
 - Go
 - Subversion CLI: `svn`
 - A valid SVN working copy
-- Optional: `meld` for file conflict resolution
+- Companion: `merger` in `PATH` or beside `svntui` for interactive file merges
+- Optional fallback: `meld` for file conflict resolution
 
 Go dependencies used by the app:
 

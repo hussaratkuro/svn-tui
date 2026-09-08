@@ -276,7 +276,11 @@ Hidden files (never listed for commit):
   name=node_modules
   path=some/dir/generated.php
 
-Meld conflict resolve requires:
+Default conflict merge tool:
+
+  merger (install it in PATH or beside svntui)
+
+Optional Meld fallback:
 
   sudo pacman -S meld
 `

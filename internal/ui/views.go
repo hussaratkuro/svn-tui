@@ -1083,6 +1083,9 @@ func (m Model) viewConflictSelect() string {
 	treeCount := len(m.treeConflicts())
 
 	items := max(3, m.listInnerHeight()-6)
+	if strings.TrimSpace(m.conflictNotice) != "" {
+		items = max(3, items-1)
+	}
 	end := min(len(m.conflictItems), m.conflictOffset+items)
 
 	var c strings.Builder
@@ -1107,7 +1110,10 @@ func (m Model) viewConflictSelect() string {
 		}
 	}
 	c.WriteString("\n")
-	c.WriteString(warningStyle.Render("File conflicts → Meld (Enter), keep current (m), take incoming (t). Tree conflicts → --accept=working (r).") + "\n")
+	c.WriteString(warningStyle.Render("File conflicts → Merger (default, Enter), Meld (M), keep current (m), take incoming (t). Tree conflicts → --accept=working (r).") + "\n")
+	if strings.TrimSpace(m.conflictNotice) != "" {
+		c.WriteString(errorStyle.Render(m.conflictNotice) + "\n")
+	}
 	c.WriteString(mutedStyle.Render(scrollHint(m.conflictOffset, end, len(m.conflictItems))))
 
 	b.WriteString(m.listBox(c.String()))
@@ -1135,7 +1141,7 @@ func (m Model) viewConflictSelect() string {
 	} else {
 		hints = append(hints, mutedStyle.Render("m/t: file conflicts only"))
 	}
-	hints = append(hints, hint("Enter", "Meld"), hint("i", "info"), hint("Esc", "back"))
+	hints = append(hints, hint("Enter", "Merger (default)"), hint("M", "Meld"), hint("i", "info"), hint("Esc", "back"))
 	b.WriteString(statusBar(hints...))
 	return b.String()
 }

@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 
@@ -121,6 +122,7 @@ type Model struct {
 	conflictItems  []model.ConflictItem
 	conflictCursor int
 	conflictOffset int
+	conflictNotice string
 	resolveConfirm resolveConfirmKind
 
 	input            textinput.Model
@@ -414,9 +416,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.conflictItems = msg.Items
 		m.conflictCursor, m.conflictOffset = 0, 0
+		m.conflictNotice = ""
 		m.resolveConfirm = resolveConfirmNone
 		m.screen = model.ScreenConflictSelect
 		return m, nil
+
+	case conflictToolPreparedMsg:
+		if msg.err != nil {
+			m.screen = model.ScreenConflictSelect
+			m.conflictNotice = msg.err.Error()
+			return m, nil
+		}
+		command := exec.Command(msg.executable, msg.args...)
+		return m, tea.ExecProcess(command, func(err error) tea.Msg {
+			return conflictToolExitedMsg{prepared: msg, err: err}
+		})
+
+	case conflictToolExitedMsg:
+		if msg.err != nil {
+			m.screen = model.ScreenConflictSelect
+			if conflictToolCancelled(msg.err) {
+				m.conflictNotice = "Merge cancelled; the SVN conflict is still unresolved."
+			} else {
+				m.conflictNotice = msg.prepared.tool + " exited with an error: " + msg.err.Error()
+			}
+			return m, nil
+		}
+		m.conflictNotice = ""
+		m.screen, m.runningTitle = model.ScreenRunning, "Marking merged file as resolved..."
+		return m, resolveConflictAfterToolCmd(msg.prepared)
 
 	case model.HistoryLoadedMsg:
 		m.screen = model.ScreenHistory
@@ -1960,6 +1988,7 @@ func (m Model) updateConflictSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.conflictCursor = navigateCursor(m.conflictCursor, len(m.conflictItems), visible, msg.String())
 	if m.conflictCursor != prevCursor {
 		m.resolveConfirm = resolveConfirmNone
+		m.conflictNotice = ""
 	}
 
 	switch msg.String() {
@@ -1998,8 +2027,14 @@ func (m Model) updateConflictSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if len(m.conflictItems) > 0 {
 			item := m.conflictItems[m.conflictCursor]
-			m.screen, m.runningTitle = model.ScreenRunning, "Resolving conflict with Meld..."
-			return m, resolveConflictWithMeldCmd(m.activeRepo, item.Path)
+			m.screen, m.runningTitle = model.ScreenRunning, "Preparing conflict for Merger..."
+			return m, prepareDefaultConflictToolCmd(m.activeRepo, item.Path)
+		}
+	case "M":
+		if len(m.conflictItems) > 0 {
+			item := m.conflictItems[m.conflictCursor]
+			m.screen, m.runningTitle = model.ScreenRunning, "Preparing conflict for Meld..."
+			return m, prepareConflictToolCmd(m.activeRepo, item.Path, "meld")
 		}
 	}
 
