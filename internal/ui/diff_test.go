@@ -127,13 +127,13 @@ func TestDiffOverviewUsesChangeColours(t *testing.T) {
 	kinds := []diffLineKind{diffLineSame, diffLineAdded, diffLineSame, diffLineDeleted, diffLineModified}
 	overview := renderDiffOverview(kinds, len(kinds), 0, 2)
 
-	if !strings.Contains(overview, diffAddedStyle.Render("█")) {
+	if !strings.Contains(overview, diffAddedStyle.Render("+")) {
 		t.Fatal("overview does not contain an added marker")
 	}
-	if !strings.Contains(overview, diffDeletedStyle.Render("█")) {
+	if !strings.Contains(overview, diffDeletedStyle.Render("-")) {
 		t.Fatal("overview does not contain a deleted marker")
 	}
-	if !strings.Contains(overview, diffModifiedStyle.Render("█")) {
+	if !strings.Contains(overview, diffModifiedStyle.Render("~")) {
 		t.Fatal("overview does not contain a modified marker")
 	}
 }

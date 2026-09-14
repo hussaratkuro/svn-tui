@@ -319,6 +319,13 @@ The interface follows the active HyDE palette from
 is unavailable it falls back to Catppuccin Mocha. Set
 `TUI_THEME=catppuccin` to force that fallback.
 
+Diffs use `TUI_DIFF_THEME=auto` by default. A monochrome or insufficiently
+distinct Wallbash palette automatically keeps the surrounding UI monochrome
+but uses semantic fallback colors for added, deleted, modified, and conflicting
+content. Set it to `wallbash`, `semantic`, or `mono` to override this behavior.
+Diff rows and the overview retain `+`, `-`, and `~` markers, so color is not the
+only signal.
+
 Clone the repository and build the binary:
 
 ```bash

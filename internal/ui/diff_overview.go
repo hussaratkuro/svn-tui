@@ -125,9 +125,9 @@ func nextDiffChange(starts []int, offset, direction int) (int, bool) {
 	return 0, false
 }
 
-// renderDiffOverview renders a one-cell-wide, full-document minimap. Coloured
-// blocks mark changes, the heavier grey section marks the current viewport,
-// and the thin grey line is the rest of the document.
+// renderDiffOverview renders a one-cell-wide, full-document minimap. The
+// +, - and ~ markers remain meaningful without colour; the heavier grey
+// section marks the current viewport and the thin grey line the rest.
 func renderDiffOverview(kinds []diffLineKind, height, offset, visible int) string {
 	if height <= 0 {
 		return ""
@@ -153,11 +153,11 @@ func renderDiffOverview(kinds []diffLineKind, height, offset, visible int) strin
 		}
 		switch kind {
 		case diffLineAdded:
-			glyph = diffAddedStyle.Render("█")
+			glyph = diffAddedStyle.Render("+")
 		case diffLineDeleted:
-			glyph = diffDeletedStyle.Render("█")
+			glyph = diffDeletedStyle.Render("-")
 		case diffLineModified:
-			glyph = diffModifiedStyle.Render("█")
+			glyph = diffModifiedStyle.Render("~")
 		}
 
 		if row > 0 {

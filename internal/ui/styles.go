@@ -119,6 +119,7 @@ var (
 func init() { applyTheme(theme.Current()) }
 
 func applyTheme(p theme.Palette) {
+	diff, appearance := resolveDiffPalette(p)
 	catMauve, catRosewater = p.Mauve, p.Rosewater
 	catOverlay0, catOverlay1 = p.Overlay0, p.Overlay1
 	catRed, catGreen, catYellow = p.Red, p.Green, p.Yellow
@@ -142,9 +143,14 @@ func applyTheme(p theme.Palette) {
 	valueWhiteStyle = lipgloss.NewStyle().Foreground(catRosewater)
 	actionStyle = lipgloss.NewStyle().Foreground(catTeal)
 	actionSelectedStyle = lipgloss.NewStyle().Foreground(catMauve).Bold(true)
-	diffAddedStyle = lipgloss.NewStyle().Foreground(catGreen)
-	diffDeletedStyle = lipgloss.NewStyle().Foreground(catRed)
-	diffModifiedStyle = lipgloss.NewStyle().Foreground(catYellow)
+	diffAddedStyle = lipgloss.NewStyle().Foreground(diff.added)
+	diffDeletedStyle = lipgloss.NewStyle().Foreground(diff.deleted)
+	diffModifiedStyle = lipgloss.NewStyle().Foreground(diff.modified)
+	if appearance == diffAppearanceMono {
+		diffAddedStyle = diffAddedStyle.Bold(true)
+		diffDeletedStyle = diffDeletedStyle.Strikethrough(true)
+		diffModifiedStyle = diffModifiedStyle.Underline(true)
+	}
 	diffSameStyle = lipgloss.NewStyle().Foreground(catSubtext0)
 	headerBarStyle = lipgloss.NewStyle().Background(catSurface1).Foreground(catText).Width(0)
 	styleBorder = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(catSurface1).PaddingLeft(1)
