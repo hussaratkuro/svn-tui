@@ -1,8 +1,12 @@
 package ui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"github.com/charmbracelet/lipgloss"
 
-// Catppuccin Mocha
+	"svn-tui/internal/theme"
+)
+
+// Catppuccin Mocha fallback; applyTheme replaces it with Wallbash roles.
 var (
 	catMauve     = lipgloss.Color("#cba6f7")
 	catRosewater = lipgloss.Color("#f5e0dc")
@@ -111,6 +115,42 @@ var (
 			Foreground(catMauve).
 			Bold(true)
 )
+
+func init() { applyTheme(theme.Current()) }
+
+func applyTheme(p theme.Palette) {
+	catMauve, catRosewater = p.Mauve, p.Rosewater
+	catOverlay0, catOverlay1 = p.Overlay0, p.Overlay1
+	catRed, catGreen, catYellow = p.Red, p.Green, p.Yellow
+	catText, catSubtext0 = p.Text, p.Subtext0
+	catSapphire, catTeal, catSurface1 = p.Sapphire, p.Teal, p.Surface1
+
+	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(catMauve)
+	selectedStyle = lipgloss.NewStyle().Foreground(catMauve).Bold(true)
+	mutedStyle = lipgloss.NewStyle().Foreground(catOverlay0)
+	normalStyle = lipgloss.NewStyle().Foreground(catSubtext0)
+	textStyle = lipgloss.NewStyle().Foreground(catText)
+	errorStyle = lipgloss.NewStyle().Foreground(catRed).Bold(true)
+	successStyle = lipgloss.NewStyle().Foreground(catGreen).Bold(true)
+	warningStyle = lipgloss.NewStyle().Foreground(catYellow).Bold(true)
+	checkboxStyle = lipgloss.NewStyle().Foreground(catOverlay1)
+	checkedStyle = lipgloss.NewStyle().Foreground(catYellow).Bold(true)
+	labelMauveStyle = lipgloss.NewStyle().Foreground(catMauve).Bold(true)
+	labelRedStyle = lipgloss.NewStyle().Foreground(catRed).Bold(true)
+	labelYellowStyle = lipgloss.NewStyle().Foreground(catYellow).Bold(true)
+	labelSapphireStyle = lipgloss.NewStyle().Foreground(catSapphire).Bold(true)
+	valueWhiteStyle = lipgloss.NewStyle().Foreground(catRosewater)
+	actionStyle = lipgloss.NewStyle().Foreground(catTeal)
+	actionSelectedStyle = lipgloss.NewStyle().Foreground(catMauve).Bold(true)
+	diffAddedStyle = lipgloss.NewStyle().Foreground(catGreen)
+	diffDeletedStyle = lipgloss.NewStyle().Foreground(catRed)
+	diffModifiedStyle = lipgloss.NewStyle().Foreground(catYellow)
+	diffSameStyle = lipgloss.NewStyle().Foreground(catSubtext0)
+	headerBarStyle = lipgloss.NewStyle().Background(catSurface1).Foreground(catText).Width(0)
+	styleBorder = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(catSurface1).PaddingLeft(1)
+	statusBarStyle = lipgloss.NewStyle().Foreground(catOverlay0)
+	statusKeyStyle = lipgloss.NewStyle().Foreground(catMauve).Bold(true)
+}
 
 // hint formats a single key:description pair for the status bar.
 func hint(key, desc string) string {

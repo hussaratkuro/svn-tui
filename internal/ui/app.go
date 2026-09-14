@@ -14,6 +14,7 @@ import (
 	"svn-tui/internal/diff"
 	"svn-tui/internal/model"
 	"svn-tui/internal/svn"
+	"svn-tui/internal/theme"
 )
 
 // resolveConfirmKind tracks which destructive resolve is armed and waiting for
@@ -185,12 +186,16 @@ func NewModel(repos []model.Repo) Model {
 	return m
 }
 
-func (m Model) Init() tea.Cmd { return nil }
+func (m Model) Init() tea.Cmd { return theme.Watch() }
 
 // ── Update ────────────────────────────────────────────────────────────────────
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case theme.ChangedMsg:
+		applyTheme(msg.Palette)
+		return m, theme.Watch()
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height

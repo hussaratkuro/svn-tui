@@ -314,6 +314,11 @@ This keeps the normal view fast while still allowing the full-history dragon to 
 
 ## Installation
 
+The interface follows the active HyDE palette from
+`~/.cache/hyde/wallbash/shell-colors`, including while it is open. If Wallbash
+is unavailable it falls back to Catppuccin Mocha. Set
+`TUI_THEME=catppuccin` to force that fallback.
+
 Clone the repository and build the binary:
 
 ```bash
