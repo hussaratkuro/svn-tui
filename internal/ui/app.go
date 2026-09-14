@@ -145,6 +145,7 @@ type Model struct {
 	result         string
 	err            error
 	showInfo       bool
+	commands       commandPalette
 }
 
 func NewModel(repos []model.Repo) Model {
@@ -211,6 +212,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
+
+	case readOnlyDiffPreparedMsg:
+		if msg.err != nil {
+			if msg.tempDir != "" {
+				_ = os.RemoveAll(msg.tempDir)
+			}
+			return m.showError("Failed to open merger.", msg.err.Error()), nil
+		}
+		m.screen = msg.returnScreen
+		return m, runPreparedMerger(msg)
+
+	case readOnlyDiffExitedMsg:
+		m.screen = msg.returnScreen
+		if msg.err != nil {
+			return m.showError("merger exited with an error.", msg.err.Error()), nil
+		}
+		return m, nil
 
 	case model.BranchesLoadedMsg:
 		if msg.Err != nil {
@@ -689,6 +707,13 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 // ── Key handlers ──────────────────────────────────────────────────────────────
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.commands.open {
+		return m.updateCommandPalette(msg)
+	}
+	if (msg.String() == "ctrl+p" || msg.String() == "ctrl+shift+p") && !m.inputActive() && m.screen != model.ScreenRunning {
+		m.openCommandPalette()
+		return m, nil
+	}
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
@@ -1585,11 +1610,21 @@ func (m Model) updateBranchDiffSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.branchDiffCursor = navigateCursor(m.branchDiffCursor, len(m.branchDiffItems), visible, msg.String())
 
 	switch msg.String() {
-	case "enter", "d":
+	case "enter", "m":
 		if len(m.branchDiffItems) == 0 {
 			break
 		}
-		m.screen, m.runningTitle = model.ScreenRunning, "Loading side-by-side diff..."
+		item := m.branchDiffItems[m.branchDiffCursor]
+		if item.IsDir {
+			return m.showError("Select a file to open in merger.", "directory comparison is not available for repository URLs"), nil
+		}
+		m.screen, m.runningTitle = model.ScreenRunning, "Preparing merger comparison..."
+		return m, prepareBranchMergerCmd(m.activeRepo, m.branchDiffCtx, item, model.ScreenBranchDiffSelect)
+	case "d":
+		if len(m.branchDiffItems) == 0 {
+			break
+		}
+		m.screen, m.runningTitle = model.ScreenRunning, "Loading built-in side-by-side diff..."
 		return m, branchFileDiffCmd(m.activeRepo, m.branchDiffCtx, m.branchDiffItems[m.branchDiffCursor], m.diffViewportWidth())
 	case "u":
 		m.screen, m.runningTitle = model.ScreenRunning, "Loading full unified diff..."
@@ -1701,6 +1736,11 @@ func (m Model) updatePullSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen, m.runningTitle = model.ScreenRunning, "Loading incoming diff..."
 			return m, remoteDiffCmd(m.activeRepo, m.commitItems[m.commitCursor], m.width-4)
 		}
+	case "m":
+		if len(m.commitItems) > 0 && !m.commitItems[m.commitCursor].IsDir {
+			m.screen, m.runningTitle = model.ScreenRunning, "Preparing merger comparison..."
+			return m, prepareIncomingMergerCmd(m.activeRepo, m.commitItems[m.commitCursor], model.ScreenPullSelect)
+		}
 	case "enter":
 		hasSelected := false
 		for _, item := range m.commitItems {
@@ -1790,6 +1830,11 @@ func (m Model) updateCommitSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.commitItems) > 0 && !m.commitItems[m.commitCursor].IsDir {
 			m.screen, m.runningTitle = model.ScreenRunning, "Loading side-by-side diff..."
 			return m, diffCmd(m.activeRepo, m.commitItems[m.commitCursor], m.diffViewportWidth())
+		}
+	case "m":
+		if len(m.commitItems) > 0 && !m.commitItems[m.commitCursor].IsDir {
+			m.screen, m.runningTitle = model.ScreenRunning, "Preparing merger comparison..."
+			return m, prepareWorkingCopyMergerCmd(m.activeRepo, m.commitItems[m.commitCursor], model.ScreenCommitSelect)
 		}
 	case "p":
 		if len(m.commitItems) == 0 {
@@ -1916,6 +1961,12 @@ func (m Model) updateShelveSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.screen, m.runningTitle = model.ScreenRunning, "Loading side-by-side diff..."
 		return m, diffCmd(m.activeRepo, item, m.diffViewportWidth())
+	case "m":
+		if len(m.commitItems) == 0 || m.commitItems[m.commitCursor].IsDir {
+			break
+		}
+		m.screen, m.runningTitle = model.ScreenRunning, "Preparing merger comparison..."
+		return m, prepareWorkingCopyMergerCmd(m.activeRepo, m.commitItems[m.commitCursor], model.ScreenShelveSelect)
 	case "enter":
 		items := selectedCommitItems(m.commitItems)
 		if len(items) == 0 {
@@ -1950,6 +2001,11 @@ func (m Model) updateRevertSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.commitItems) > 0 {
 			m.screen, m.runningTitle = model.ScreenRunning, "Loading side-by-side diff..."
 			return m, diffCmd(m.activeRepo, m.commitItems[m.commitCursor], m.diffViewportWidth())
+		}
+	case "m":
+		if len(m.commitItems) > 0 && !m.commitItems[m.commitCursor].IsDir {
+			m.screen, m.runningTitle = model.ScreenRunning, "Preparing merger comparison..."
+			return m, prepareWorkingCopyMergerCmd(m.activeRepo, m.commitItems[m.commitCursor], model.ScreenRevertSelect)
 		}
 	case "enter":
 		selected := selectedCommitItems(m.commitItems)

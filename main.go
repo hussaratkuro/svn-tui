@@ -6,12 +6,27 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"svn-tui/internal/credential"
 	"svn-tui/internal/svn"
 	"svn-tui/internal/ui"
 )
 
 func main() {
-	repos := svn.LoadRepos()
+	configs := svn.LoadRepoConfigs()
+	if credential.Required(configs) {
+		password, err := credential.PromptVaultPassword()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "svntui:", err)
+			os.Exit(1)
+		}
+		configs, err = credential.Resolve(configs, password)
+		password = ""
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "svntui:", err)
+			os.Exit(1)
+		}
+	}
+	repos := svn.BuildRepos(configs)
 
 	p := tea.NewProgram(
 		ui.NewModel(repos),

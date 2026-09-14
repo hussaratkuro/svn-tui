@@ -20,6 +20,17 @@ func Run(r model.Repo, args ...string) (string, error) {
 	return string(out), err
 }
 
+// Cat returns repository file bytes without mixing command diagnostics into
+// the content. Arguments follow `svn cat`, for example "-r", "BASE", path.
+func Cat(r model.Repo, args ...string) ([]byte, error) {
+	finalArgs := baseArgs(r, true)
+	finalArgs = append(finalArgs, "cat")
+	finalArgs = append(finalArgs, args...)
+	cmd := exec.Command("svn", finalArgs...)
+	cmd.Dir = r.Path
+	return cmd.Output()
+}
+
 // StreamLines runs an svn command and calls emit once per output line.
 func StreamLines(r model.Repo, emit func(string), args ...string) error {
 	finalArgs := baseArgs(r, true)

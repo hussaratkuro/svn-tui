@@ -77,6 +77,7 @@ type RepoConfig struct {
 	Path           string
 	Username       string
 	Password       string
+	CredentialRef  string
 	BranchUsername string
 }
 

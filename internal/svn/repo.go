@@ -14,6 +14,12 @@ import (
 
 // LoadRepos discovers all configured SVN repositories.
 func LoadRepos() []model.Repo {
+	return BuildRepos(LoadRepoConfigs())
+}
+
+// LoadRepoConfigs discovers repository configuration without contacting SVN.
+// This lets main resolve encrypted credential references before BuildRepo runs.
+func LoadRepoConfigs() []model.RepoConfig {
 	var configs []model.RepoConfig
 
 	for _, path := range configFilePaths("repo.txt") {
@@ -38,6 +44,11 @@ func LoadRepos() []model.Repo {
 		}
 	}
 
+	return configs
+}
+
+// BuildRepos queries SVN metadata for each usable repository configuration.
+func BuildRepos(configs []model.RepoConfig) []model.Repo {
 	seen := map[string]bool{}
 	var repos []model.Repo
 	for _, cfg := range configs {
@@ -117,6 +128,8 @@ func loadConfigFile(path string) []model.RepoConfig {
 			current.Username = val
 		case "password", "pass":
 			current.Password = val
+		case "credential_ref", "credential", "gopass":
+			current.CredentialRef = val
 		case "branch_username", "branch_user", "branchname_user":
 			current.BranchUsername = val
 		}
@@ -261,10 +274,14 @@ Example:
 
   path=/home/user/dev/
   username=user
-  password=YOUR_PASSWORD_HERE
+  credential_ref=SVN credential title or ID
   branch_username=user
 
-Important:
+Alternative plaintext password (not recommended):
+
+  password=YOUR_PASSWORD_HERE
+
+Important for files containing plaintext passwords:
 
   chmod 600 ~/.config/svn-tui/repo.txt
 

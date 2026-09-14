@@ -43,6 +43,7 @@ Supported behavior:
 - select all with `a`
 - clear selection with `n`
 - inspect file diff with `d`
+- open the highlighted file in the shared read-only `merger` viewer with `m`
 - commit selected files with a message
 - automatically runs `svn add` for selected unversioned files
 
@@ -68,6 +69,7 @@ The Revert action lists local changes and lets you choose which files to revert.
 
 - select files with `Space`
 - view side-by-side diff with `d`
+- open the same comparison in read-only `merger` with `m`
 - revert only selected files
 
 > Warning: `svn revert` discards local changes for selected versioned files.
@@ -129,7 +131,8 @@ the cursor starts on the branch the working copy is on:
 Both open a list of the changed paths (`M` modified, `A` added, `D` deleted,
 `R` replaced, trailing `P` for a property change). From there:
 
-- `Enter` or `d` opens one path side by side, read straight from the repository
+- `Enter` or `m` opens one path in the shared read-only `merger` viewer
+- `d` keeps the built-in side-by-side viewer available as a fallback
 - `u` shows the complete unified diff of the comparison (truncated at 2 MB)
 - `Esc` goes back to the branch list
 
@@ -375,7 +378,7 @@ Example:
 ```ini
 path=/home/user/dev/
 username=user
-password=YOUR_PASSWORD_HERE
+credential_ref=My SVN login
 branch_username=user
 ```
 
@@ -384,12 +387,12 @@ Multiple repositories can be configured by separating blocks with an empty line:
 ```ini
 path=/home/user/dev/
 username=user
-password=YOUR_PASSWORD_HERE
+credential_ref=Work SVN
 branch_username=user
 
 path=/home/user/dev/another-project
 username=user
-password=YOUR_PASSWORD_HERE
+credential_ref=Private SVN
 branch_username=user
 ```
 
@@ -405,8 +408,15 @@ Supported config keys:
 | --- | --- |
 | `path`, `repo`, `working_copy` | Local SVN working copy path |
 | `username`, `user` | SVN username |
-| `password`, `pass` | SVN password |
+| `credential_ref`, `credential`, `gopass` | Encrypted gopass entry ID or unique title |
+| `password`, `pass` | Plaintext SVN password (legacy; gopass is recommended) |
 | `branch_username`, `branch_user`, `branchname_user` | Username part used when creating branches |
+
+When at least one repository uses `credential_ref`, svn-tui asks for the
+gopass vault password once before opening its full-screen interface. The
+password is sent only through stdin to `gopass credential`; repository
+configuration stores no SVN password. A username explicitly set in `repo.txt`
+wins, otherwise the gopass entry's username is used.
 
 ## Hidden files
 
@@ -469,6 +479,10 @@ SVN_TUI_REPOS="/home/user/dev/:/home/user/dev/another-project" svn-tui
 ```
 
 ## Keyboard shortcuts
+
+`Ctrl+Shift+P` opens the fuzzy command palette from every non-input screen
+(`Ctrl+P` is accepted for terminals that do not report Shift separately). It
+can switch repositories or launch any SVN action directly.
 
 ### Global navigation
 

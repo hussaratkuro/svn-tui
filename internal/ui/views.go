@@ -14,6 +14,9 @@ import (
 // ── Top-level view dispatcher ─────────────────────────────────────────────────
 
 func (m Model) View() string {
+	if m.commands.open {
+		return m.viewCommandPalette()
+	}
 	switch m.screen {
 	case model.ScreenRepoSelect:
 		return m.viewRepoSelect()
@@ -567,7 +570,7 @@ func (m Model) viewBranchDiffSelect() string {
 	c.WriteString(mutedStyle.Render(scrollHint(m.branchDiffOffset, end, len(m.branchDiffItems))))
 
 	b.WriteString(m.listBox(c.String()))
-	b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("Enter/d", "file diff"), hint("u", "full unified diff"), hint("i", "info"), hint("Esc", "branches"), hint("q", "menu")))
+	b.WriteString(statusBar(hint("↑↓/jk", "move"), hint("Enter/m", "merger"), hint("d", "built-in diff"), hint("u", "full diff"), hint("i", "info"), hint("Esc", "branches"), hint("q", "menu")))
 	return b.String()
 }
 
@@ -736,7 +739,7 @@ func (m Model) viewPullSelect() string {
 	c.WriteString(mutedStyle.Render(scrollHint(m.commitOffset, end, len(m.commitItems))))
 
 	b.WriteString(m.listBox(c.String()))
-	b.WriteString(statusBar(hint("Space", "select/dir"), hint("a", "all"), hint("n", "none"), hint("d", "diff"), hint("Enter", "pull selected"), hint("i", "info"), hint("Esc", "back")))
+	b.WriteString(statusBar(hint("Space", "select/dir"), hint("a", "all"), hint("n", "none"), hint("d", "diff"), hint("m", "merger"), hint("Enter", "pull selected"), hint("i", "info"), hint("Esc", "back")))
 	return b.String()
 }
 
@@ -786,7 +789,7 @@ func (m Model) viewShelveSelect() string {
 	c.WriteString(mutedStyle.Render(scrollHint(m.commitOffset, end, len(m.commitItems))))
 
 	b.WriteString(m.listBox(c.String()))
-	b.WriteString(statusBar(hint("Space", "select"), hint("a", "all"), hint("n", "none"), hint("d", "diff"), hint("Enter", "shelve"), hint("i", "info"), hint("Esc", "back")))
+	b.WriteString(statusBar(hint("Space", "select"), hint("a", "all"), hint("n", "none"), hint("d", "diff"), hint("m", "merger"), hint("Enter", "shelve"), hint("i", "info"), hint("Esc", "back")))
 	return b.String()
 }
 
@@ -863,7 +866,7 @@ func (m Model) viewCommitSelect() string {
 	if m.deleteConfirmIdx >= 0 {
 		b.WriteString("\n" + warningStyle.Render("Del again: confirm permanent deletion — or move cursor to cancel"))
 	} else {
-		hints := []string{hint("Space", "select/dir"), hint("a", "all"), hint("n", "none"), hint("h", "hide root"), hint("d", "file diff"), hint("p", "partial hunks"), hint("Enter", "commit message"), hint("i", "info"), hint("Esc", "back")}
+		hints := []string{hint("Space", "select/dir"), hint("a", "all"), hint("n", "none"), hint("h", "hide root"), hint("d", "file diff"), hint("m", "merger"), hint("p", "partial hunks"), hint("Enter", "commit message"), hint("i", "info"), hint("Esc", "back")}
 		canDelete := func(ci model.CommitItem) bool {
 			return ci.Unversioned || (len(ci.Status) > 0 && ci.Status[0] == 'A')
 		}
@@ -1014,7 +1017,7 @@ func (m Model) viewRevertSelect() string {
 	c.WriteString(mutedStyle.Render(scrollHint(m.commitOffset, end, len(m.commitItems))))
 
 	b.WriteString(m.listBox(c.String()))
-	b.WriteString(statusBar(hint("Space", "select"), hint("a", "all"), hint("n", "none"), hint("d", "diff"), hint("Enter", "revert selected"), hint("i", "info"), hint("Esc", "back")))
+	b.WriteString(statusBar(hint("Space", "select"), hint("a", "all"), hint("n", "none"), hint("d", "diff"), hint("m", "merger"), hint("Enter", "revert selected"), hint("i", "info"), hint("Esc", "back")))
 	return b.String()
 }
 
