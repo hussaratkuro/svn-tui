@@ -1463,7 +1463,7 @@ func loadShelvesCmd(r model.Repo) tea.Cmd {
 	}
 }
 
-func shelveChangesCmd(r model.Repo, items []model.CommitItem) tea.Cmd {
+func shelveChangesCmd(r model.Repo, items []model.CommitItem, shelfName string) tea.Cmd {
 	return func() tea.Msg {
 		var output strings.Builder
 
@@ -1472,7 +1472,10 @@ func shelveChangesCmd(r model.Repo, items []model.CommitItem) tea.Cmd {
 			return model.CommandResult{Output: "Select at least one file.", Err: fmt.Errorf("no files selected"), CurrentLocation: svn.GetCurrentLocation(r), URL: svn.GetCurrentURL(r)}
 		}
 
-		shelfName := "auto-" + time.Now().Format("20060102-150405")
+		shelfName = strings.TrimSpace(shelfName)
+		if err := validateNewShelfName(r, shelfName); err != nil {
+			return model.CommandResult{Output: "Shelf was not created.", Err: err, CurrentLocation: r.CurrentLocation, URL: r.URL}
+		}
 		shelfDir := filepath.Join(r.Path, model.ShelvesDir, shelfName)
 		filesDir := filepath.Join(shelfDir, "files")
 		patchPath := filepath.Join(shelfDir, "changes.patch")
@@ -1487,7 +1490,23 @@ func shelveChangesCmd(r model.Repo, items []model.CommitItem) tea.Cmd {
 			output.WriteString("  " + item.Status + " " + item.Path + "\n")
 		}
 
-		if err := os.MkdirAll(filesDir, 0700); err != nil {
+		if err := os.MkdirAll(filepath.Join(r.Path, model.ShelvesDir), 0700); err != nil {
+			return model.CommandResult{Output: output.String(), Err: err, CurrentLocation: svn.GetCurrentLocation(r), URL: svn.GetCurrentURL(r)}
+		}
+		if err := os.Mkdir(shelfDir, 0700); err != nil {
+			if os.IsExist(err) {
+				err = fmt.Errorf("a shelf named %q already exists", shelfName)
+			}
+			return model.CommandResult{Output: output.String(), Err: err, CurrentLocation: svn.GetCurrentLocation(r), URL: svn.GetCurrentURL(r)}
+		}
+		shelfSaved := false
+		defer func() {
+			if !shelfSaved {
+				_ = os.RemoveAll(shelfDir)
+				_, _ = removeShelvesRootIfEmpty(r)
+			}
+		}()
+		if err := os.Mkdir(filesDir, 0700); err != nil {
 			return model.CommandResult{Output: output.String(), Err: err, CurrentLocation: svn.GetCurrentLocation(r), URL: svn.GetCurrentURL(r)}
 		}
 
@@ -1534,6 +1553,7 @@ func shelveChangesCmd(r model.Repo, items []model.CommitItem) tea.Cmd {
 		if err := os.WriteFile(manifestPath, manifestBytes, 0600); err != nil {
 			return model.CommandResult{Output: output.String(), Err: err, CurrentLocation: svn.GetCurrentLocation(r), URL: svn.GetCurrentURL(r)}
 		}
+		shelfSaved = true
 
 		if len(versionedPaths) > 0 {
 			output.WriteString("\nReverting selected versioned files after saving patch...\n\n")
@@ -1554,6 +1574,33 @@ func shelveChangesCmd(r model.Repo, items []model.CommitItem) tea.Cmd {
 		output.WriteString("\n\nNote: this is a custom SVN TUI shelf stored in .svn-tui-shelves.")
 		return model.CommandResult{Output: output.String(), CurrentLocation: svn.GetCurrentLocation(r), URL: svn.GetCurrentURL(r)}
 	}
+}
+
+func validateNewShelfName(r model.Repo, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("shelf name is required")
+	}
+	if len(name) > 200 {
+		return fmt.Errorf("shelf name must be at most 200 bytes")
+	}
+	if name == "." || name == ".." || strings.ContainsAny(name, "/\\") {
+		return fmt.Errorf("shelf name cannot contain / or \\ and cannot be . or ..")
+	}
+	for _, r := range name {
+		if r < ' ' || r == 0x7f {
+			return fmt.Errorf("shelf name cannot contain control characters")
+		}
+	}
+
+	_, err := os.Lstat(filepath.Join(r.Path, model.ShelvesDir, name))
+	if err == nil {
+		return fmt.Errorf("a shelf named %q already exists", name)
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("cannot check shelf name %q: %w", name, err)
+	}
+	return nil
 }
 
 func unshelveChangesCmd(r model.Repo, shelfName string) tea.Cmd {

@@ -46,6 +46,8 @@ func (m Model) View() string {
 		return m.viewPullSelect()
 	case model.ScreenShelveSelect:
 		return m.viewShelveSelect()
+	case model.ScreenShelveNameInput:
+		return m.viewShelveNameInput()
 	case model.ScreenCommitSelect:
 		return m.viewCommitSelect()
 	case model.ScreenCommitMessageInput:
@@ -790,6 +792,24 @@ func (m Model) viewShelveSelect() string {
 
 	b.WriteString(m.listBox(c.String()))
 	b.WriteString(statusBar(hint("Space", "select"), hint("a", "all"), hint("n", "none"), hint("d", "diff"), hint("m", "merger"), hint("Enter", "shelve"), hint("i", "info"), hint("Esc", "back")))
+	return b.String()
+}
+
+func (m Model) viewShelveNameInput() string {
+	var b strings.Builder
+	b.WriteString(m.compactHeader("Name shelf"))
+
+	var c strings.Builder
+	c.WriteString(mutedStyle.Render(fmt.Sprintf("Selected files: %d", len(selectedCommitItems(m.commitItems)))) + "\n\n")
+	c.WriteString(textStyle.Render("Shelf name:") + "\n")
+	c.WriteString(m.input.View() + "\n\n")
+	c.WriteString(mutedStyle.Render("Use a unique name without / or \\. Leading and trailing spaces are removed."))
+	if m.shelfNameError != "" {
+		c.WriteString("\n\n" + errorStyle.Render(m.shelfNameError))
+	}
+
+	b.WriteString(m.listBox(c.String()))
+	b.WriteString(statusBar(hint("Enter", "create shelf"), hint("Esc", "back")))
 	return b.String()
 }
 

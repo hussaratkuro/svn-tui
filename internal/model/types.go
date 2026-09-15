@@ -20,6 +20,7 @@ const (
 	ScreenDeleteBranchConfirm
 	ScreenShelfSelect
 	ScreenShelveSelect
+	ScreenShelveNameInput
 	ScreenPullSelect
 	ScreenCommitSelect
 	ScreenCommitMessageInput

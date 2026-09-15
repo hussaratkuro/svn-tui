@@ -67,6 +67,7 @@ type Model struct {
 	shelfCursor    int
 	shelfOffset    int
 	shelfDeleteIdx int
+	shelfNameError string
 
 	fileHistoryQuery  string
 	fileHistoryItems  []string
@@ -597,6 +598,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.screen == model.ScreenCreateBranchInput ||
 		m.screen == model.ScreenCheckoutRevisionInput ||
+		m.screen == model.ScreenShelveNameInput ||
 		m.screen == model.ScreenCommitMessageInput ||
 		m.screen == model.ScreenFileHistorySearch {
 		var cmd tea.Cmd
@@ -800,6 +802,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case model.ScreenDeleteBranchConfirm:
 			m.input.Reset()
 			m.screen = model.ScreenBranchSelect
+		case model.ScreenShelveNameInput:
+			m.input.Reset()
+			m.shelfNameError = ""
+			m.screen = model.ScreenShelveSelect
 		case model.ScreenHistorySearch:
 			m.screen = model.ScreenHistory
 		case model.ScreenPropertyTargetInput:
@@ -906,6 +912,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updatePullSelect(msg)
 	case model.ScreenShelveSelect:
 		return m.updateShelveSelect(msg)
+	case model.ScreenShelveNameInput:
+		return m.updateShelveNameInput(msg)
 	case model.ScreenCommitSelect:
 		return m.updateCommitSelect(msg)
 	case model.ScreenCommitMessageInput:
@@ -1972,12 +1980,39 @@ func (m Model) updateShelveSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(items) == 0 {
 			return m.showError("Select at least one file with Space before shelving.", "no files selected"), nil
 		}
-		m.screen, m.runningTitle = model.ScreenRunning, "Shelving selected files..."
-		return m, shelveChangesCmd(m.activeRepo, items)
+		m.input.Reset()
+		m.input.Placeholder = "e.g. ticket-123-login-fix"
+		m.input.Focus()
+		m.shelfNameError = ""
+		m.screen = model.ScreenShelveNameInput
 	}
 
 	m.commitOffset = adjustOffset(m.commitOffset, m.commitCursor, visible)
 	return m, nil
+}
+
+func (m Model) updateShelveNameInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "enter" {
+		name := strings.TrimSpace(m.input.Value())
+		if err := validateNewShelfName(m.activeRepo, name); err != nil {
+			m.shelfNameError = err.Error()
+			return m, nil
+		}
+		items := selectedCommitItems(m.commitItems)
+		if len(items) == 0 {
+			m.shelfNameError = "select at least one file before shelving"
+			m.screen = model.ScreenShelveSelect
+			return m, nil
+		}
+		m.shelfNameError = ""
+		m.screen, m.runningTitle = model.ScreenRunning, "Shelving selected files..."
+		return m, shelveChangesCmd(m.activeRepo, items, name)
+	}
+
+	m.shelfNameError = ""
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
 }
 
 func (m Model) updateRevertSelect(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -2253,6 +2288,7 @@ func (m Model) inputActive() bool {
 	case model.ScreenCreateBranchInput,
 		model.ScreenCheckoutRevisionInput,
 		model.ScreenDeleteBranchConfirm,
+		model.ScreenShelveNameInput,
 		model.ScreenCommitMessageInput,
 		model.ScreenFileHistorySearch,
 		model.ScreenHistorySearch,

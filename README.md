@@ -158,7 +158,11 @@ an earlier revision.
 Deleting the branch the working copy is checked out on is allowed, but the
 result reminds you to switch to trunk afterwards.
 
-### Unshelve or delete shelves
+### Shelve, unshelve, or delete shelves
+
+After selecting the local changes to shelve, `Enter` opens a name prompt. Shelf
+names must be unique and cannot contain `/` or `\`. The shelf is stored under
+that name in `.svn-tui-shelves`.
 
 The Unshelve action lists the shelves stored in `.svn-tui-shelves`.
 
