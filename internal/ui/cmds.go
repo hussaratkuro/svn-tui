@@ -596,11 +596,11 @@ func branchDiffStatusText(item model.BranchDiffItem) string {
 // branchFileDiffCmd opens one path of a branch comparison side by side.
 func branchFileDiffCmd(r model.Repo, ctx model.BranchDiffContext, item model.BranchDiffItem, width int) tea.Cmd {
 	return func() tea.Msg {
-		out, err := buildBranchFileDiff(r, ctx, item, width)
+		out, source, err := buildBranchFileDiffSource(r, ctx, item, width)
 		if err != nil {
 			return model.DiffLoadedMsg{Output: out, Err: err, Path: item.Path}
 		}
-		return model.DiffLoadedMsg{Output: out, Path: item.Path}
+		return model.DiffLoadedMsg{Output: out, Path: item.Path, Source: source}
 	}
 }
 
@@ -2027,7 +2027,7 @@ func loadRevisionTreeCmd(r model.Repo, full bool) tea.Cmd {
 
 func diffCmd(r model.Repo, item model.CommitItem, width int) tea.Cmd {
 	return func() tea.Msg {
-		out, err := buildSideBySideDiff(r, item, width)
+		out, source, err := buildSideBySideDiffSource(r, item, width)
 		if err != nil {
 			fallbackArgs := []string{"diff"}
 			if item.IsDir {
@@ -2042,7 +2042,7 @@ func diffCmd(r model.Repo, item model.CommitItem, width int) tea.Cmd {
 			}
 			return model.DiffLoadedMsg{Output: out, Err: fmt.Errorf("side-by-side diff failed\n\nWorking copy: %s\nPath: %s\n\nError: %w", r.Path, item.Path, err), Path: item.Path}
 		}
-		return model.DiffLoadedMsg{Output: out, Path: item.Path}
+		return model.DiffLoadedMsg{Output: out, Path: item.Path, Source: source}
 	}
 }
 

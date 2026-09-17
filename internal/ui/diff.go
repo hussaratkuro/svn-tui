@@ -13,19 +13,24 @@ import (
 )
 
 func buildSideBySideDiff(r model.Repo, item model.CommitItem, width int) (string, error) {
+	output, _, err := buildSideBySideDiffSource(r, item, width)
+	return output, err
+}
+
+func buildSideBySideDiffSource(r model.Repo, item model.CommitItem, width int) (string, *model.SideBySideDiffSource, error) {
 	if isLikelyDir(r, item.Path) {
 		// --depth empty shows exactly what committing this entry would send:
 		// the directory's own node and properties, not the local changes of
 		// files below it. (SVN still carries a copied directory recursively.)
 		out, err := svn.Run(r, "diff", "--depth", "empty", "--", item.Path)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		header := "Directory diff — this is what a commit of this entry would send:\n\n"
 		if strings.TrimSpace(out) == "" {
-			return header + "(no change of its own)", nil
+			return header + "(no change of its own)", nil, nil
 		}
-		return header + colorizeUnifiedDiff(out), nil
+		return header + colorizeUnifiedDiff(out), nil, nil
 	}
 
 	var oldText, newText string
@@ -39,27 +44,27 @@ func buildSideBySideDiff(r model.Repo, item model.CommitItem, width int) (string
 			newText, err = readRepoHeadFile(r, item.Path)
 		}
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 	case strings.HasPrefix(item.Status, "D"):
 		oldText, err = readBaseFile(r, item.Path)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		newText = ""
 	default:
 		oldText, err = readBaseFile(r, item.Path)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		newText, err = readWorkingFile(r, item.Path)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
 	if isBinaryContent([]byte(oldText)) || isBinaryContent([]byte(newText)) {
 		return "Path: " + item.Path + "\nStatus: " + item.Status + "\n\n" +
-			warningStyle.Render("Binary file — no side-by-side text diff."), nil
+			warningStyle.Render("Binary file — no side-by-side text diff."), nil, nil
 	}
 
 	oldEOL := detectEOLStyle(oldText)
@@ -79,10 +84,10 @@ func buildSideBySideDiff(r model.Repo, item model.CommitItem, width int) (string
 		out, serr := svn.Run(r, "diff", "--", item.Path)
 		eolNote := buildEOLNote(oldEOL, newEOL, oldHasEOF, newHasEOF)
 		if serr == nil && strings.TrimSpace(out) != "" {
-			return "Path: " + item.Path + "\nStatus: " + item.Status + "\n" + eolNote + "\nContent is identical — SVN reports a property diff:\n\n" + colorizeUnifiedDiff(out), nil
+			return "Path: " + item.Path + "\nStatus: " + item.Status + "\n" + eolNote + "\nContent is identical — SVN reports a property diff:\n\n" + colorizeUnifiedDiff(out), nil, nil
 		}
 		if serr == nil {
-			return "Path: " + item.Path + "\nStatus: " + item.Status + "\n" + eolNote + "\nNo text or property diff found.", nil
+			return "Path: " + item.Path + "\nStatus: " + item.Status + "\n" + eolNote + "\nNo text or property diff found.", nil, nil
 		}
 	}
 
@@ -97,8 +102,18 @@ func buildSideBySideDiff(r model.Repo, item model.CommitItem, width int) (string
 		b.WriteString(mutedStyle.Render("Note: added file — left side is empty.") + "\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(renderSideBySideBody(oldText, newText, "OLD / BASE", "NEW / WORKING COPY", width))
-	return b.String(), nil
+	source := &model.SideBySideDiffSource{
+		Prefix: b.String(), OldText: oldText, NewText: newText,
+		OldLabel: "OLD / BASE", NewLabel: "NEW / WORKING COPY",
+	}
+	return renderSideBySideSource(source, width), source, nil
+}
+
+func renderSideBySideSource(source *model.SideBySideDiffSource, width int) string {
+	if source == nil {
+		return ""
+	}
+	return source.Prefix + renderSideBySideBody(source.OldText, source.NewText, source.OldLabel, source.NewLabel, width)
 }
 
 // renderSideBySideBody renders the two-column table for a pair of file
@@ -510,6 +525,11 @@ func toCRLF(s string) string {
 // Both sides come straight from the repository, so it works without the file
 // being present in the working copy.
 func buildBranchFileDiff(r model.Repo, ctx model.BranchDiffContext, item model.BranchDiffItem, width int) (string, error) {
+	output, _, err := buildBranchFileDiffSource(r, ctx, item, width)
+	return output, err
+}
+
+func buildBranchFileDiffSource(r model.Repo, ctx model.BranchDiffContext, item model.BranchDiffItem, width int) (string, *model.SideBySideDiffSource, error) {
 	oldTarget := ctx.Old.PathTarget(item.Path)
 	newTarget := ctx.New.PathTarget(item.Path)
 	status := strings.ToUpper(strings.TrimSpace(item.Status))
@@ -526,36 +546,36 @@ func buildBranchFileDiff(r model.Repo, ctx model.BranchDiffContext, item model.B
 		// against; its files show up as their own entries in the list.
 		if strings.HasPrefix(status, "A") {
 			b.WriteString("Directory added on the new side — its files are listed separately.")
-			return b.String(), nil
+			return b.String(), nil, nil
 		}
 		if strings.HasPrefix(status, "D") {
 			b.WriteString("Directory missing from the new side — its files are listed separately.")
-			return b.String(), nil
+			return b.String(), nil, nil
 		}
 		// --depth empty keeps the diff to the directory node itself, the same
 		// way the working-copy diff does for a directory entry.
 		out, err := svn.Run(r, "diff", "--depth", "empty", oldTarget, newTarget)
 		if err != nil {
-			return "", fmt.Errorf("svn diff failed for directory %s\n\nOutput:\n%s\n\nError: %w", item.Path, out, err)
+			return "", nil, fmt.Errorf("svn diff failed for directory %s\n\nOutput:\n%s\n\nError: %w", item.Path, out, err)
 		}
 		if strings.TrimSpace(out) == "" {
 			b.WriteString("Directory entry only — it has no property diff of its own.")
-			return b.String(), nil
+			return b.String(), nil, nil
 		}
 		b.WriteString(colorizeUnifiedDiff(out))
-		return b.String(), nil
+		return b.String(), nil, nil
 	}
 
 	var oldText, newText string
 	var err error
 	if !strings.HasPrefix(status, "A") {
 		if oldText, err = readRepoFileTarget(r, oldTarget); err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
 	if !strings.HasPrefix(status, "D") {
 		if newText, err = readRepoFileTarget(r, newTarget); err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
 
@@ -565,7 +585,7 @@ func buildBranchFileDiff(r model.Repo, ctx model.BranchDiffContext, item model.B
 		if out, derr := svn.Run(r, "diff", oldTarget, newTarget); derr == nil && strings.TrimSpace(out) != "" {
 			b.WriteString("\n" + colorizeUnifiedDiff(out))
 		}
-		return b.String(), nil
+		return b.String(), nil, nil
 	}
 
 	oldEOL, newEOL := detectEOLStyle(oldText), detectEOLStyle(newText)
@@ -581,13 +601,16 @@ func buildBranchFileDiff(r model.Repo, ctx model.BranchDiffContext, item model.B
 		out, derr := svn.Run(r, "diff", oldTarget, newTarget)
 		if derr == nil && strings.TrimSpace(out) != "" {
 			b.WriteString("\nContent is identical — SVN reports a property diff:\n\n" + colorizeUnifiedDiff(out))
-			return b.String(), nil
+			return b.String(), nil, nil
 		}
 	}
 
 	b.WriteString("\n")
-	b.WriteString(renderSideBySideBody(oldText, newText, ctx.Old.Label, ctx.New.Label, width))
-	return b.String(), nil
+	source := &model.SideBySideDiffSource{
+		Prefix: b.String(), OldText: oldText, NewText: newText,
+		OldLabel: ctx.Old.Label, NewLabel: ctx.New.Label,
+	}
+	return renderSideBySideSource(source, width), source, nil
 }
 
 // readRepoFileTarget reads a repository path pinned to a peg revision.

@@ -186,3 +186,90 @@ func TestAltNavigationRemembersChangeNearViewportBottom(t *testing.T) {
 		t.Fatalf("Alt+Up from clamped last change offset = %d, want 10", m.viewport.YOffset)
 	}
 }
+
+func TestOpenSideBySideDiffRerendersWhenWindowWidthChanges(t *testing.T) {
+	m := NewModel([]model.Repo{{Path: t.TempDir()}})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m = updated.(Model)
+
+	source := &model.SideBySideDiffSource{
+		Prefix:   "Path: long.txt\nStatus: M\n\n",
+		OldText:  strings.Repeat("old value ", 16) + "\n",
+		NewText:  strings.Repeat("new value ", 16) + "\n",
+		OldLabel: "OLD",
+		NewLabel: "NEW",
+	}
+	// Simulate the terminal being resized while the asynchronous diff command
+	// was still running: Output has a stale width, Source does not.
+	updated, _ = m.Update(model.DiffLoadedMsg{
+		Output: renderSideBySideSource(source, 160),
+		Path:   "long.txt",
+		Source: source,
+	})
+	m = updated.(Model)
+	wideLineCount := m.viewport.TotalLineCount()
+	wantWideLineCount := len(strings.Split(renderSideBySideSource(source, m.diffViewportWidth()), "\n"))
+	if wideLineCount != wantWideLineCount {
+		t.Fatalf("loaded diff has %d lines, want %d at current width", wideLineCount, wantWideLineCount)
+	}
+
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 46, Height: 24})
+	m = updated.(Model)
+	narrowLineCount := m.viewport.TotalLineCount()
+	if narrowLineCount <= wideLineCount {
+		t.Fatalf("narrow diff has %d lines, want more than wide diff's %d", narrowLineCount, wideLineCount)
+	}
+	if m.viewport.Width != m.diffViewportWidth() {
+		t.Fatalf("viewport width = %d, want %d", m.viewport.Width, m.diffViewportWidth())
+	}
+	if m.viewport.YOffset != 0 {
+		t.Fatalf("diff that originally fit the viewport jumped to offset %d after narrowing", m.viewport.YOffset)
+	}
+
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	m = updated.(Model)
+	if got := m.viewport.TotalLineCount(); got != wideLineCount {
+		t.Fatalf("widened diff has %d lines, want original %d", got, wideLineCount)
+	}
+}
+
+func TestDiffResizeKeepsSelectedChangeAndBottomPosition(t *testing.T) {
+	m := NewModel([]model.Repo{{Path: t.TempDir()}})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 90, Height: 14})
+	m = updated.(Model)
+
+	source := &model.SideBySideDiffSource{
+		Prefix:   "Path: changes.txt\nStatus: M\n\n",
+		OldText:  "first old\n" + strings.Repeat("same\n", 15) + strings.Repeat("second old ", 12) + "\n",
+		NewText:  "first new\n" + strings.Repeat("same\n", 15) + strings.Repeat("second new ", 12) + "\n",
+		OldLabel: "OLD", NewLabel: "NEW",
+	}
+	updated, _ = m.Update(model.DiffLoadedMsg{
+		Output: renderSideBySideSource(source, m.diffViewportWidth()),
+		Path:   "changes.txt",
+		Source: source,
+	})
+	m = updated.(Model)
+	starts := diffChangeStarts(m.diffLineKinds)
+	if len(starts) != 2 {
+		t.Fatalf("change starts = %v, want two blocks", starts)
+	}
+	m.diffChangeCursor = 1
+	m.viewport.SetYOffset(starts[1])
+
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 48, Height: 14})
+	m = updated.(Model)
+	starts = diffChangeStarts(m.diffLineKinds)
+	wantOffset := min(starts[1], max(0, m.viewport.TotalLineCount()-m.viewport.VisibleLineCount()))
+	if m.diffChangeCursor != 1 || m.viewport.YOffset != wantOffset {
+		t.Fatalf("selected change after resize = cursor %d offset %d, want cursor 1 offset %d", m.diffChangeCursor, m.viewport.YOffset, wantOffset)
+	}
+
+	m.diffChangeCursor = -1
+	m.viewport.GotoBottom()
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 70, Height: 18})
+	m = updated.(Model)
+	if !m.viewport.AtBottom() {
+		t.Fatalf("diff left the bottom after resize: offset %d of %d lines", m.viewport.YOffset, m.viewport.TotalLineCount())
+	}
+}

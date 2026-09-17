@@ -131,6 +131,7 @@ type Model struct {
 	viewport         viewport.Model
 	diffLineKinds    []diffLineKind
 	diffChangeCursor int
+	diffSource       *model.SideBySideDiffSource
 
 	historyTitle   string
 	historyContent string
@@ -199,12 +200,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, theme.Watch()
 
 	case tea.WindowSizeMsg:
+		oldDiffWidth := m.diffViewportWidth()
+		oldDiffTotal := m.viewport.TotalLineCount()
+		oldDiffVisible := m.viewport.VisibleLineCount()
+		oldDiffOffset := m.viewport.YOffset
+		oldDiffAtBottom := oldDiffTotal > oldDiffVisible && m.viewport.AtBottom()
 		m.width = msg.Width
 		m.height = msg.Height
 		m.viewport.Width = max(20, msg.Width-4)
 		m.viewport.Height = max(5, msg.Height-6)
 		if m.screen == model.ScreenDiff {
 			m.syncDiffViewportSize()
+			if oldDiffWidth != m.diffViewportWidth() {
+				m.rerenderOpenDiff(oldDiffTotal, oldDiffVisible, oldDiffOffset, oldDiffAtBottom)
+			}
 		}
 		return m, nil
 
@@ -519,7 +528,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case model.DiffLoadedMsg:
 		m.screen = model.ScreenDiff
 		m.err = msg.Err
+		m.diffSource = msg.Source
 		content := msg.Output
+		if msg.Source != nil && msg.Err == nil {
+			content = renderSideBySideSource(msg.Source, m.diffViewportWidth())
+		}
 		if msg.Err != nil {
 			content = "Failed to load side-by-side diff for:\n" + msg.Path + "\n\n" + msg.Output + "\n\n" + msg.Err.Error()
 		} else if strings.TrimSpace(msg.Output) == "" {
@@ -2343,6 +2356,34 @@ func (m Model) diffViewportHeight() int {
 func (m *Model) syncDiffViewportSize() {
 	m.viewport.Width = m.diffViewportWidth()
 	m.viewport.Height = m.diffViewportHeight()
+}
+
+func (m *Model) rerenderOpenDiff(oldTotal, oldVisible, oldOffset int, wasAtBottom bool) {
+	if m.diffSource == nil {
+		return
+	}
+
+	content := renderSideBySideSource(m.diffSource, m.diffViewportWidth())
+	m.diffLineKinds = classifyDiffLines(content)
+	m.viewport.SetContent(content)
+
+	starts := diffChangeStarts(m.diffLineKinds)
+	if m.diffChangeCursor >= 0 && m.diffChangeCursor < len(starts) {
+		m.viewport.SetYOffset(starts[m.diffChangeCursor])
+		return
+	}
+	if wasAtBottom {
+		m.viewport.GotoBottom()
+		return
+	}
+
+	oldScrollable := max(0, oldTotal-oldVisible)
+	newScrollable := max(0, m.viewport.TotalLineCount()-m.viewport.VisibleLineCount())
+	if oldScrollable == 0 || newScrollable == 0 {
+		m.viewport.SetYOffset(0)
+		return
+	}
+	m.viewport.SetYOffset(oldOffset * newScrollable / oldScrollable)
 }
 
 func (m Model) pullListVisibleCount() int {

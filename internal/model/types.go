@@ -420,6 +420,18 @@ type DiffLoadedMsg struct {
 	Output string
 	Err    error
 	Path   string
+	Source *SideBySideDiffSource
+}
+
+// SideBySideDiffSource keeps the unwrapped inputs of an open diff. The UI can
+// render them again when the terminal width changes without reading the
+// working copy or repository a second time.
+type SideBySideDiffSource struct {
+	Prefix   string
+	OldText  string
+	NewText  string
+	OldLabel string
+	NewLabel string
 }
 
 type PartialHunksLoadedMsg struct {
